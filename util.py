@@ -35,49 +35,35 @@ def login() -> str:
         print("Error: USER and PASS must be set in .env", file=sys.stderr)
         sys.exit(1)
 
-    # Step 1: initial login request with username and password
-    resp = httpx.post(f"{API_BASE}/login", json={"username": username, "password": password})
+    # Step 1: always request a captcha challenge
+    resp = httpx.post(f"{API_BASE}/requestReCaptcha")
+    captcha_data = resp.json()
+    if captcha_data.get("status") != "success":
+        print(f"Failed to request captcha: {captcha_data}", file=sys.stderr)
+        sys.exit(1)
+
+    challenge = captcha_data["challenge"]
+    captcha_url = captcha_data["captcha_url"]
+    print(f"Open this URL in your browser:")
+    print(f"  {captcha_url}")
+    response = input("Enter the captcha response: ").strip()
+
+    # Step 2: login with captcha challenge and response
+    resp = httpx.post(f"{API_BASE}/login", json={
+        "username": username,
+        "password": password,
+        "re_captcha_challenge": challenge,
+        "re_captcha_response": response,
+    })
     data = resp.json()
+    if data.get("status") != "success":
+        print(f"Login failed: {data}", file=sys.stderr)
+        sys.exit(1)
 
-    if data.get("status") == "success":
-        token = data["auth_token"]
-        TOKEN_FILE.write_text(token)
-        print(f"Logged in, token saved to {TOKEN_FILE}")
-        return token
-
-    # If ReCaptcha is required, request a captcha challenge
-    if data.get("errorCode") == 33:
-        resp = httpx.post(f"{API_BASE}/requestReCaptcha")
-        captcha_data = resp.json()
-        if captcha_data.get("status") != "success":
-            print(f"Failed to request captcha: {captcha_data}", file=sys.stderr)
-            sys.exit(1)
-
-        challenge = captcha_data["challenge"]
-        captcha_url = captcha_data["captcha_url"]
-        print(f"ReCaptcha required. Open this URL in your browser:")
-        print(f"  {captcha_url}")
-        response = input("Enter the captcha response: ").strip()
-
-        # Step 2: retry login with captcha challenge and response
-        resp = httpx.post(f"{API_BASE}/login", json={
-            "username": username,
-            "password": password,
-            "re_captcha_challenge": challenge,
-            "re_captcha_response": response,
-        })
-        data = resp.json()
-        if data.get("status") != "success":
-            print(f"Login failed: {data}", file=sys.stderr)
-            sys.exit(1)
-
-        token = data["auth_token"]
-        TOKEN_FILE.write_text(token)
-        print(f"Logged in, token saved to {TOKEN_FILE}")
-        return token
-
-    print(f"Login failed: {data}", file=sys.stderr)
-    sys.exit(1)
+    token = data["auth_token"]
+    TOKEN_FILE.write_text(token)
+    print(f"Logged in, token saved to {TOKEN_FILE}")
+    return token
 
 
 def get_token() -> str:

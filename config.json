@@ -5,6 +5,7 @@
         "adb": "https://www.adultdb.io/"
     },
     "extract": [
-        "https://k2s.cc/file/"
+        "https://k2s.cc/file/",
+        "http://k2s.cc/file/"
     ]
 }
