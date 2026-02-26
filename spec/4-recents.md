@@ -16,3 +16,18 @@ For each video, show:
 
 - When opening a video, wait for it to load, then seek to the latest saved position.
 - For a new video, the latest position is the position where the user clicked on the preview.
+
+
+## Web Server Mode
+
+The recents button supports right-click to toggle a built-in HTTP web server:
+
+- **Right-click** the recents button to start an HTTP server on **port 9999** that serves the recents page to an external browser.
+- When the server is active, the recents button shows an **active/highlighted state** (green background).
+- **Right-click again** to stop the server and restore the button to its normal state.
+- The served page is self-contained with an embedded `<video>` player inside each video card:
+  - The player is hidden by default and appears when the user clicks a video title or frame strip entry.
+  - Clicking a frame strip entry also seeks the player to that frame's position.
+  - The player shows standard HTML5 video controls (play, pause, seek, volume).
+- In the embedded WebView (left click), the recents page uses the Flutter media_kit player instead — clicking a title or frame plays through the app's built-in player.
+

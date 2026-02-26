@@ -87,12 +87,12 @@ def get_download_url(url: str) -> str:
 
 
 def extract_file_id(url: str) -> str:
-    match = re.match(r"https://k2s\.cc/file/([^/]+)", url)
+    match = re.match(r"https?://(k2s\.cc|keep2share\.cc)/file/([^/]+)", url)
     if not match:
         print(f"Error: invalid URL format: {url}", file=sys.stderr)
-        print("Expected: https://k2s.cc/file/<file_id>/...", file=sys.stderr)
+        print("Expected: https://k2s.cc/file/<file_id>/... or https://keep2share.cc/file/<file_id>/...", file=sys.stderr)
         sys.exit(1)
-    return match.group(1)
+    return match.group(2)
 
 
 def cmd_info(url: str) -> None:
@@ -140,6 +140,41 @@ def cmd_vlc(url: str) -> None:
     subprocess.run(["open", "-a", "VLC", download_url])
 
 
+def cmd_scan(url: str) -> None:
+    resp = httpx.get(url, follow_redirects=True)
+    resp.raise_for_status()
+    links = re.findall(r"https?://(?:k2s\.cc|keep2share\.cc)/file/[^\s\"'<>]+", resp.text)
+    unique = list(dict.fromkeys(links))  # dedupe preserving order
+    if not unique:
+        print("No k2s/keep2share file links found.", file=sys.stderr)
+        return
+    # Extract file IDs and get info
+    file_ids = []
+    id_to_url = {}
+    for link in unique:
+        match = re.match(r"https?://(?:k2s\.cc|keep2share\.cc)/file/([^/?]+)", link)
+        if match:
+            fid = match.group(1)
+            if fid not in id_to_url:
+                id_to_url[fid] = link
+                file_ids.append(fid)
+    payload: dict = {"ids": file_ids}
+    token = load_token()
+    if token:
+        payload["auth_token"] = token
+    resp2 = httpx.post(f"{API_BASE}/getFilesInfo", json=payload)
+    data = resp2.json()
+    files = data.get("files", []) if data.get("status") == "success" else []
+    info_by_id = {f["id"]: f for f in files if isinstance(f, dict)}
+    for fid in file_ids:
+        link = id_to_url[fid]
+        info = info_by_id.get(fid, {})
+        name = info.get("name", "?")
+        avail = info.get("is_available", "?")
+        size = info.get("size", "?")
+        print(f"  {avail}  {size:>12}  {name}  {link}")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print("Usage: uv run util.py <command> [args...]", file=sys.stderr)
@@ -148,6 +183,7 @@ def main() -> None:
         print("  info <url>  - get file info", file=sys.stderr)
         print("  link <url>  - get download URL for a k2s.cc link", file=sys.stderr)
         print("  vlc <url>   - get download URL and open in VLC", file=sys.stderr)
+        print("  scan <url>  - scan page for k2s links and show info", file=sys.stderr)
         sys.exit(1)
 
     command = sys.argv[1]
@@ -169,6 +205,11 @@ def main() -> None:
             print("Usage: uv run util.py vlc <url>", file=sys.stderr)
             sys.exit(1)
         cmd_vlc(sys.argv[2])
+    elif command == "scan":
+        if len(sys.argv) < 3:
+            print("Usage: uv run util.py scan <url>", file=sys.stderr)
+            sys.exit(1)
+        cmd_scan(sys.argv[2])
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         sys.exit(1)

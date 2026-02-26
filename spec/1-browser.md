@@ -1,8 +1,15 @@
 # Browser (Right Pane — Top)
 
-The top of the right pane contains a browser with a navigation bar, the **filename** of the currently previewed link, **rating buttons** (colored 1-5) for the currently previewed link, a **Play** button, and a **Pick** button. The browser supports both HTTP and HTTPS URLs.
+The top of the right pane contains a browser with a navigation bar, the **filename** of the currently previewed link, **rating buttons** (colored 1-5) for the currently previewed link, a **Play** button, a **Download** button, and a **Pick** button. The browser supports both HTTP and HTTPS URLs.
 
-After clicking a rating button, the next random link is automatically picked (same rules as Pick button).
+### Download Button
+
+Enabled when a k2s link is available (same conditions as Play). Clicking it executes the following command and shows it with the result in the browser log page:
+```
+echo '/mnt/data/deobro/get.sh <url>' | ssh -i <sandbox>/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null onyx.n7s.co at now
+```
+
+After clicking a rating button, the next random link is automatically picked (same rules as Pick button). Right-clicking a rating button rates the currently selected tree node (link or path) without picking a random next link.
 
 ### Pick Button
 
@@ -21,13 +28,18 @@ When previewing a file `<id>`:
 
 Each sprite image is a **5x5 grid** of frames. Generate JavaScript so that clicking on the image calculates the frame number from the image index and the click position within the grid.
 
-When showing a sprite preview show on top the video filename, then 4 buttons to preview the video 1/sec 2/sec 4/sec 8/sec and an horizontal scrollbar and a stop button all in the same row
+### Preview Toolbar
 
-when you click those buttons show in sequence centered at 80% of width and height the frames one every x/sec of the button
+A fixed toolbar at the top of the preview page shows:
 
-when you move the scrollbar it will show the frames at the position  you can go back and forth. Also works on the current frame like for single frames on preview without zoomimng.
+- **Filename** of the currently previewed video.
+- **Rating dots** (colored 1–5) — clicking a dot rates the video.
+- **Speed buttons** (1/s, 2/s, 4/s, 8/s) — start a sequential preview, showing frames centered at 80% width/height at the selected rate.
+- **Scrubber** (horizontal slider) — manually navigate frames back and forth. Also works on the current frame in the overlay without zooming.
+- **Stop button** — stops the sequential preview and closes the overlay.
+- **Frame info** — displays current frame number and timestamp.
 
-the toolbar is fixed on the top so In can scroll the preview without hiding the buttons
+The toolbar is fixed at the top so it remains visible while scrolling the sprite grid.
 
 ## Playing a Video
 
@@ -79,11 +91,15 @@ Clicking on a frame shows a popup near the mouse with tag and rating icons.
 ### Tagging Behavior
 
 - **Left click** on a frame: show the tagging popup and navigate to that frame.
-- **Right click** on a frame: show the tagging popup without navigating.
+- **Right click** on a frame: show the tagging popup without navigating. If the video is not already in recents, resolve the download URL and add it to recents (without playing).
 - Clicking a **tag icon** saves a tag at the current frame position. The tag appears on the tag bar at a position proportional to its location in the video. Clicking the tag on the bar seeks to that position.
 - Clicking a **rating icon** assigns a rating to the video. The rating color appears as a background in the links list. Links are ordered by rating (rated first, then by rating value).
 - **Right click** on a tag in the bar removes it.
 - Tags and ratings are persisted in `data.json` (see [5-format.md](5-format.md)).
+
+### Tag Indicators on Preview
+
+When displaying the sprite preview, show existing tag emoji icons overlaid on the sprite grid at the corresponding frame positions. Each tag emoji is positioned in the top-left corner of its frame cell, with a dark text shadow for visibility against the sprite images.
 
 ### Popup Dismissal
 

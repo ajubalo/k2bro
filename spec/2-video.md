@@ -24,6 +24,11 @@ Each video player has, from top to bottom:
 ## Player Controls
 
 - **Radio button**: select this player as the active one.
+
+- **Surprise icon** (`casino`/dice): play a random video from the recents list, resuming at the latest saved position.
+- **Collection icon** (`folder_open`): navigate to the current video's origin collection in the tree — expands the correct category, domain, group, and path nodes, and selects the link.
+
+
 - **Lens icon**: open the preview for the current video in the browser.
 - **Next arrow**: left click goes to the next video in recents; right click goes to the previous. Resumes at the latest saved position or the most advanced tag position.
 - **Clock icon**: open the recents page in the browser.

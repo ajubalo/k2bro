@@ -1,15 +1,16 @@
-import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:webview_flutter/webview_flutter.dart';
-import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
-import 'package:window_manager/window_manager.dart';
-import 'package:screen_retriever/screen_retriever.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+// Platform-conditional: desktop APIs on macOS, stubs on web.
+// ignore: uri_does_not_exist
+import 'src/platform_desktop.dart'
+    // ignore: uri_does_not_exist
+    if (dart.library.html) 'src/platform_web.dart';
+import 'src/tree.dart';
+import 'src/utils.dart';
 
 // Tag and rating constants
 const List<String> kTagKeys = ['blo', 'dog', 'fro', 'bak', 'ass', 'cum'];
@@ -19,30 +20,7 @@ final List<Color> kRatingColors = [Colors.red, Colors.amber, Colors.green, Color
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-  await windowManager.ensureInitialized();
-
-  final primaryDisplay = await screenRetriever.getPrimaryDisplay();
-  final screenWidth = primaryDisplay.size.width;
-  final screenHeight = primaryDisplay.size.height;
-
-  final windowWidth = screenWidth * 0.9;
-  WindowOptions windowOptions = WindowOptions(
-    size: Size(windowWidth, screenHeight),
-    minimumSize: const Size(800, 600),
-    center: false,
-    backgroundColor: Colors.transparent,
-    skipTaskbar: false,
-    titleBarStyle: TitleBarStyle.normal,
-  );
-
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    await windowManager.setPosition(const Offset(0, 0));
-    await windowManager.setSize(Size(windowWidth, screenHeight));
-    await windowManager.show();
-    await windowManager.focus();
-  });
-
+  await initPlatform(); // no-op on web; window + media_kit setup on desktop
   runApp(const MyApp());
 }
 
@@ -119,25 +97,35 @@ class AppData {
     return result;
   }
 
+  /// Strip trailing '/' from a path (unless the path is just '/').
+  static String normalizePath(String path) {
+    if (path.length > 1 && path.endsWith('/')) {
+      return path.substring(0, path.length - 1);
+    }
+    return path;
+  }
+
   void addSite(String domain, String path) {
     data.putIfAbsent(domain, () => {});
-    if (path.isNotEmpty && path != '/') {
-      data[domain]!.putIfAbsent(path, () => {});
+    final p = normalizePath(path);
+    if (p.isNotEmpty && p != '/') {
+      data[domain]!.putIfAbsent(p, () => {});
     }
   }
 
   void addLink(String domain, String path, String url) {
+    final p = normalizePath(path);
     data.putIfAbsent(domain, () => {});
-    data[domain]!.putIfAbsent(path, () => {});
-    data[domain]![path]!.putIfAbsent(url, () => {});
+    data[domain]!.putIfAbsent(p, () => {});
+    data[domain]![p]!.putIfAbsent(url, () => {});
   }
 
   void removeLink(String domain, String path, String url) {
-    data[domain]?[path]?.remove(url);
+    data[domain]?[normalizePath(path)]?.remove(url);
   }
 
   void removePath(String domain, String path) {
-    data[domain]?.remove(path);
+    data[domain]?.remove(normalizePath(path));
   }
 
   void removeDomain(String domain) {
@@ -153,7 +141,7 @@ class AppData {
 
   List<String> visibleLinksFor(String domain, String path) {
     final entries = data[domain]?[path]?.entries
-        .where((e) => e.key != '__meta__' && e.value['hidden'] != true && e.value['rating'] != 5 && !e.key.toLowerCase().endsWith('.rar'))
+        .where((e) => e.key != '__meta__' && e.value['hidden'] != true && e.value['rating'] != 5)
         .toList() ?? [];
     // Sort: rated first (ascending by rating), then unrated; alphabetical within same rating
     entries.sort((a, b) {
@@ -231,6 +219,26 @@ class AppData {
     return data[domain]?[path]?[url]?['source_page'] as String?;
   }
 
+  void setVr(String domain, String path, String url, bool vr) {
+    final info = data[domain]?[path]?[url];
+    if (info == null) return;
+    info['vr'] = vr;
+  }
+
+  bool getVr(String domain, String path, String url) {
+    return data[domain]?[path]?[url]?['vr'] == true;
+  }
+
+  void setFileSize(String domain, String path, String url, int bytes) {
+    final info = data[domain]?[path]?[url];
+    if (info == null) return;
+    info['file_size'] = bytes;
+  }
+
+  int? getFileSize(String domain, String path, String url) {
+    return data[domain]?[path]?[url]?['file_size'] as int?;
+  }
+
   // Path-level rating (stored in __meta__ key)
   void setPathRating(String domain, String path, int rating) {
     final pathMap = data[domain]?[path];
@@ -247,7 +255,7 @@ class AppData {
   List<String> visibleLinksWithRating(String domain, String path, int rating) {
     return data[domain]?[path]?.entries
         .where((e) => e.key != '__meta__' && e.value['hidden'] != true
-            && e.value['rating'] == rating && !e.key.toLowerCase().endsWith('.rar'))
+            && e.value['rating'] == rating)
         .map((e) => e.key)
         .toList() ?? [];
   }
@@ -256,7 +264,7 @@ class AppData {
   List<String> visibleUnratedLinks(String domain, String path) {
     return data[domain]?[path]?.entries
         .where((e) => e.key != '__meta__' && e.value['hidden'] != true
-            && e.value['rating'] == null && !e.key.toLowerCase().endsWith('.rar'))
+            && e.value['rating'] == null)
         .map((e) => e.key)
         .toList() ?? [];
   }
@@ -288,6 +296,7 @@ class RecentVideo {
   double position; // last position in seconds
   double maxPosition; // furthest position reached in seconds
   int totalFrames; // total frames from preview
+  double? _probedDuration; // cached ffprobe duration in seconds
   DateTime lastPlayed;
   final DateTime createdAt; // when first added to recents
 
@@ -388,21 +397,35 @@ class _MainPageState extends State<MainPage> {
   // Recent videos
   List<RecentVideo> _recentVideos = [];
   String _recentFilePath = '';
+  String _searchFilePath = '';
 
-  // Tree selection
-  String? _selectedDomain;
-  String? _selectedPath;
-  String? _selectedLink;
+  // Recents web server
+  HttpServer? _recentsServer;
+  bool _recentsServerActive = false;
+
+  // Tree
+  final GlobalKey<TreeViewState> _treeKey = GlobalKey<TreeViewState>();
+  TreeSelection _treeSelection = const TreeSelection();
+  final List<(String, List<(String, String, String)>)> _searchResults = [];
+
+  // Info data (index.json + .env credentials from Documents folder)
+  Map<String, Map<String, String>> _infoData = {};
+  String _infoU = '';
+  String _infoP = '';
+  String _infoH = '';
 
   // Pick scope: remembers which node was selected when Pick was first pressed
   String? _pickScopeDomain;
   String? _pickScopePath;
+  List<String>? _pickScopeGroupPaths;
 
-  // Tree expand/collapse state
-  final Set<String> _expandedCategories = {}; // "fresh", "rated", "tagged"
-  final Set<String> _expandedCategoryRatings = {}; // "rated\t1", "tagged\t2", etc.
-  final Set<String> _expandedDomains = {}; // "category\tdomain"
-  final Set<String> _expandedPaths = {}; // stored as "domain\tpath"
+  // Extract loop state
+  bool _deepExtract = false;
+  bool _extractLooping = false;
+  int _extractLoopPage = 0;
+  final TextEditingController _extractLimitController = TextEditingController(text: '0');
+  WebViewController? _extractController; // offscreen controller for extract loop
+  String _extractUrl = ''; // URL tracker for offscreen controller
 
   // K2S API
   static const _k2sApiBase = 'https://keep2share.cc/api/v2';
@@ -423,6 +446,9 @@ class _MainPageState extends State<MainPage> {
     _loadConfig();
     _loadData();
     _loadRecent();
+    _loadSearches();
+    _loadInfoData();
+    _loadInfoEnv();
     _addressController.text = _currentUrl;
 
     // Periodically update max position and percentage
@@ -431,135 +457,161 @@ class _MainPageState extends State<MainPage> {
       if (mounted) setState(() {});
     });
 
-    // Listen for player errors (e.g. expired download links)
+    // Listen for player errors and playing state changes
     for (int i = 0; i < 2; i++) {
       final idx = i;
       _players[i].stream.error.listen((error) {
         stderr.writeln('[player$idx] error: $error');
         _onPlayerError(idx);
       });
+      _players[i].stream.playing.listen((_) {
+        if (mounted) setState(() {});
+      });
     }
 
-    final params = WebKitWebViewControllerCreationParams(
-      allowsInlineMediaPlayback: true,
-    );
-    _browserController = WebViewController.fromPlatformCreationParams(params)
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onNavigationRequest: (NavigationRequest request) {
-            return NavigationDecision.navigate;
-          },
-          onPageStarted: (String url) {
-            setState(() {
-              _addressController.text = url;
-            });
-          },
-          onPageFinished: (String url) {
-            setState(() {
-              _currentUrl = url;
-              _addressController.text = url;
-            });
-          },
-        ),
-      )
-      ..addJavaScriptChannel(
-        'FrameClick',
-        onMessageReceived: (JavaScriptMessage message) {
-          final msg = message.message;
-          // Recents page messages routed through FrameClick
-          if (msg.startsWith('recents:')) {
-            _onRecentsClick(msg.substring(8));
-            return;
-          }
-          // Double-click: add blo tag and play video at frame
-          if (msg.startsWith('dblclick:')) {
-            final frame = int.tryParse(msg.substring(9));
-            if (frame != null) {
-              _onFrameDoubleClicked(frame);
+    if (!kIsWeb) {
+      _browserController = WebViewController.fromPlatformCreationParams(
+          WebKitWebViewControllerCreationParams(allowsInlineMediaPlayback: true))
+        ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..setNavigationDelegate(
+          NavigationDelegate(
+            onNavigationRequest: (NavigationRequest request) {
+              return NavigationDecision.navigate;
+            },
+            onPageStarted: (String url) {
+              setState(() {
+                _addressController.text = url;
+              });
+            },
+            onPageFinished: (String url) {
+              setState(() {
+                _currentUrl = url;
+                _addressController.text = url;
+              });
+            },
+          ),
+        )
+        ..addJavaScriptChannel(
+          'FrameClick',
+          onMessageReceived: (JavaScriptMessage message) {
+            final msg = message.message;
+            // Recents page messages routed through FrameClick
+            if (msg.startsWith('recents:')) {
+              _onRecentsClick(msg.substring(8));
+              return;
             }
-            return;
-          }
-          // Fallback: tag and rating messages routed through FrameClick
-          if (msg.startsWith('tag:')) {
-            final parts = msg.substring(4).split(':');
+            // Double-click: add blo tag and play video at frame
+            if (msg.startsWith('dblclick:')) {
+              final frame = int.tryParse(msg.substring(9));
+              if (frame != null) {
+                _onFrameDoubleClicked(frame);
+              }
+              return;
+            }
+            // Fallback: tag and rating messages routed through FrameClick
+            if (msg.startsWith('tag:')) {
+              final parts = msg.substring(4).split(':');
+              if (parts.length == 2) {
+                final frame = int.tryParse(parts[0]);
+                final tagKey = parts[1];
+                if (frame != null && kTagKeys.contains(tagKey)) {
+                  _onTagClicked(frame, tagKey);
+                }
+              }
+              return;
+            }
+            if (msg.startsWith('rate:')) {
+              final rating = int.tryParse(msg.substring(5));
+              if (rating != null && rating >= 1 && rating <= 5) {
+                _onRatingClicked(rating);
+              }
+              return;
+            }
+            if (msg.startsWith('play:')) {
+              final url = msg.substring(5);
+              if (isK2sFileUrl(url)) {
+                _currentPreviewK2sUrl = url;
+                _onFrameClicked(0);
+              }
+              return;
+            }
+            final frame = int.tryParse(msg);
+            if (frame != null) {
+              _onFrameClicked(frame);
+            }
+          },
+        )
+        ..addJavaScriptChannel(
+          'FrameRightClick',
+          onMessageReceived: (JavaScriptMessage message) {
+            final frame = int.tryParse(message.message);
+            if (frame != null) {
+              _onFrameRightClicked(frame);
+            }
+          },
+        )
+        ..addJavaScriptChannel(
+          'TagClick',
+          onMessageReceived: (JavaScriptMessage message) {
+            stderr.writeln('[tag] TagClick received: "${message.message}"');
+            // format: "frame:tagkey"
+            final parts = message.message.split(':');
             if (parts.length == 2) {
               final frame = int.tryParse(parts[0]);
               final tagKey = parts[1];
+              stderr.writeln('[tag] parsed frame=$frame tagKey=$tagKey valid=${frame != null && kTagKeys.contains(tagKey)}');
               if (frame != null && kTagKeys.contains(tagKey)) {
                 _onTagClicked(frame, tagKey);
               }
+            } else {
+              stderr.writeln('[tag] unexpected format, parts=${parts.length}');
             }
-            return;
-          }
-          if (msg.startsWith('rate:')) {
-            final rating = int.tryParse(msg.substring(5));
+          },
+        )
+        ..addJavaScriptChannel(
+          'RatingClick',
+          onMessageReceived: (JavaScriptMessage message) {
+            final rating = int.tryParse(message.message);
             if (rating != null && rating >= 1 && rating <= 5) {
               _onRatingClicked(rating);
             }
-            return;
-          }
-          if (msg.startsWith('play:')) {
-            final url = msg.substring(5);
-            if (_isK2sFileUrl(url)) {
-              _currentPreviewK2sUrl = url;
-              _onFrameClicked(0);
-            }
-            return;
-          }
-          final frame = int.tryParse(msg);
-          if (frame != null) {
-            _onFrameClicked(frame);
-          }
-        },
-      )
-      ..addJavaScriptChannel(
-        'FrameRightClick',
-        onMessageReceived: (JavaScriptMessage message) {
-          final frame = int.tryParse(message.message);
-          if (frame != null) {
-            _onFrameRightClicked(frame);
-          }
-        },
-      )
-      ..addJavaScriptChannel(
-        'TagClick',
-        onMessageReceived: (JavaScriptMessage message) {
-          stderr.writeln('[tag] TagClick received: "${message.message}"');
-          // format: "frame:tagkey"
-          final parts = message.message.split(':');
-          if (parts.length == 2) {
-            final frame = int.tryParse(parts[0]);
-            final tagKey = parts[1];
-            stderr.writeln('[tag] parsed frame=$frame tagKey=$tagKey valid=${frame != null && kTagKeys.contains(tagKey)}');
-            if (frame != null && kTagKeys.contains(tagKey)) {
-              _onTagClicked(frame, tagKey);
-            }
-          } else {
-            stderr.writeln('[tag] unexpected format, parts=${parts.length}');
-          }
-        },
-      )
-      ..addJavaScriptChannel(
-        'RatingClick',
-        onMessageReceived: (JavaScriptMessage message) {
-          final rating = int.tryParse(message.message);
-          if (rating != null && rating >= 1 && rating <= 5) {
-            _onRatingClicked(rating);
-          }
-        },
-      )
-      ..addJavaScriptChannel(
-        'RecentsClick',
-        onMessageReceived: (JavaScriptMessage message) {
-          _onRecentsClick(message.message);
-        },
-      )
-      ..loadRequest(Uri.parse(_currentUrl));
+          },
+        )
+        ..addJavaScriptChannel(
+          'RecentsClick',
+          onMessageReceived: (JavaScriptMessage message) {
+            _onRecentsClick(message.message);
+          },
+        )
+        ..loadRequest(Uri.parse(_currentUrl));
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    try {
+      globalOverlay = Overlay.of(context);
+    } catch (_) {}
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+    _flashTimer?.cancel();
+    _flashMessage = null;
+    // Clean up stale overlay entries and reset tree state
+    closeAllSpriteHovers();
+    _treeKey.currentState?.resetState();
+    // Refresh global overlay reference
+    try {
+      globalOverlay = Overlay.of(context);
+    } catch (_) {}
   }
 
   @override
   void dispose() {
+    _flashTimer?.cancel();
     _positionTimer?.cancel();
     for (final s in _pendingSeeks) { s?.cancel(); }
     _savePlayerPositions();
@@ -570,7 +622,57 @@ class _MainPageState extends State<MainPage> {
       f.dispose();
     }
     _addressController.dispose();
+    _extractLimitController.dispose();
+    _extractController = null;
+    _recentsServer?.close();
     super.dispose();
+  }
+
+  /// Create an offscreen WebViewController for extraction. Desktop only.
+  WebViewController _createExtractController() {
+    assert(!kIsWeb, '_createExtractController called on web');
+    final controller = WebViewController.fromPlatformCreationParams(
+        WebKitWebViewControllerCreationParams(allowsInlineMediaPlayback: false))
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (String url) {
+            _extractUrl = url;
+          },
+        ),
+      );
+    return controller;
+  }
+
+  /// The controller to use for extraction (offscreen if looping, main otherwise).
+  /// Must only be called when [kIsWeb] is false.
+  WebViewController get _activeExtractController {
+    assert(!kIsWeb, '_activeExtractController accessed on web');
+    return _extractController ?? _browserController;
+  }
+
+  /// The current URL of the active extraction controller.
+  String get _activeExtractUrl => _extractController != null ? _extractUrl : _currentUrl;
+
+  /// Load a URL in the extraction controller.
+  void _loadExtractUrl(String url) {
+    if (kIsWeb) return;
+    String urlToLoad = url;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      urlToLoad = 'https://$url';
+    }
+    _activeExtractController.loadRequest(Uri.parse(urlToLoad));
+  }
+
+  /// Wait until _extractUrl differs from [originalUrl], polling every 500ms.
+  Future<void> _waitForExtractUrlChange(String originalUrl, Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (_extractUrl == originalUrl) {
+      if (DateTime.now().isAfter(deadline)) {
+        throw TimeoutException('Extract URL did not change', timeout);
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
   }
 
   // ============================================================
@@ -682,6 +784,110 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
+  // ============================================================
+  // Search persistence
+  // ============================================================
+
+  Future<String> _getSearchFilePath() async {
+    if (_searchFilePath.isEmpty) {
+      final dir = await getApplicationDocumentsDirectory();
+      _searchFilePath = '${dir.path}/k2bro_searches.json';
+    }
+    return _searchFilePath;
+  }
+
+  Future<void> _loadSearches() async {
+    try {
+      final path = await _getSearchFilePath();
+      final file = File(path);
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final List<dynamic> list = json.decode(content);
+        setState(() {
+          _searchResults.clear();
+          for (final item in list) {
+            final pattern = item['pattern'] as String;
+            final matches = (item['matches'] as List<dynamic>)
+                .map((m) => (m[0] as String, m[1] as String, m[2] as String))
+                .toList();
+            _searchResults.add((pattern, matches));
+          }
+        });
+      }
+    } catch (e) {
+      stderr.writeln('Error loading searches: $e');
+    }
+  }
+
+  Future<void> _saveSearches() async {
+    try {
+      final path = await _getSearchFilePath();
+      final file = File(path);
+      final list = _searchResults.map((s) => {
+        'pattern': s.$1,
+        'matches': s.$2.map((m) => [m.$1, m.$2, m.$3]).toList(),
+      }).toList();
+      final jsonString = const JsonEncoder.withIndent('  ').convert(list);
+      await file.writeAsString(jsonString);
+    } catch (e) {
+      stderr.writeln('Error saving searches: $e');
+    }
+  }
+
+  // ============================================================
+  // Info data loading (index.json + .env from Documents)
+  // ============================================================
+
+  Future<void> _loadInfoData() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/index.json');
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final jsonData = json.decode(content) as Map<String, dynamic>;
+        final loaded = <String, Map<String, String>>{};
+        jsonData.forEach((folder, sizes) {
+          if (sizes is Map<String, dynamic>) {
+            loaded[folder] = {};
+            sizes.forEach((sizeKey, path) {
+              if (path is String) {
+                loaded[folder]![sizeKey] = path;
+              }
+            });
+          }
+        });
+        setState(() {
+          _infoData = loaded;
+        });
+      }
+    } catch (e) {
+      stderr.writeln('Error loading info data: $e');
+    }
+  }
+
+  Future<void> _loadInfoEnv() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/.env');
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        for (final line in content.split('\n')) {
+          final trimmed = line.trim();
+          if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
+          final eqIdx = trimmed.indexOf('=');
+          if (eqIdx < 0) continue;
+          final key = trimmed.substring(0, eqIdx).trim();
+          final value = trimmed.substring(eqIdx + 1).trim();
+          if (key == 'U') _infoU = value;
+          else if (key == 'P') _infoP = value;
+          else if (key == 'H') _infoH = value;
+        }
+      }
+    } catch (e) {
+      stderr.writeln('Error loading .env: $e');
+    }
+  }
+
   void _savePlayerPositions() {
     final toRemove = <String>[];
     for (int i = 0; i < 2; i++) {
@@ -724,6 +930,7 @@ class _MainPageState extends State<MainPage> {
   // ============================================================
 
   Future<String?> _getK2sToken() async {
+    if (kIsWeb) return null;
     final dir = await getApplicationDocumentsDirectory();
     final tokenFile = File('${dir.path}/.token');
     stderr.writeln('[k2s] checking token at: ${tokenFile.path}');
@@ -739,27 +946,22 @@ class _MainPageState extends State<MainPage> {
   }
 
   Future<String?> _getDownloadUrl(String k2sUrl) async {
-    final match = RegExp(r'https://k2s\.cc/file/([^/]+)').firstMatch(k2sUrl);
-    if (match == null) return null;
+    if (kIsWeb) return null;
+    final fileId = extractFileId(k2sUrl);
+    if (fileId == null) return null;
 
     // Check connectivity first
     if (!await _checkConnectivity()) {
       stderr.writeln('[k2s] connectivity check failed');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Cannot connect to K2S. Check your internet connection.')),
-        );
+        _showFlash('Cannot connect to K2S. Check your internet connection.');
       }
       return null;
-    }
-
-    final fileId = match.group(1)!;
+    };
     final token = await _getK2sToken();
     if (token == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No token found. Run "uv run util.py link <url>" first to generate .token')),
-        );
+        _showFlash('No token found. Run "uv run util.py link <url>" first to generate .token');
       }
       return null;
     }
@@ -771,7 +973,7 @@ class _MainPageState extends State<MainPage> {
       request.headers.contentType = ContentType.json;
       request.write(json.encode({'file_id': fileId, 'auth_token': token}));
       final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
+      final body = await response.transform(const Utf8Decoder(allowMalformed: true)).join();
       client.close();
 
       final data = json.decode(body) as Map<String, dynamic>;
@@ -780,9 +982,7 @@ class _MainPageState extends State<MainPage> {
       } else {
         stderr.writeln('[k2s] getUrl failed: $data');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('getUrl failed: ${data['message'] ?? data}')),
-          );
+          _showFlash('getUrl failed: ${data['message'] ?? data}');
         }
         return null;
       }
@@ -797,7 +997,7 @@ class _MainPageState extends State<MainPage> {
   // ============================================================
 
   String _titleFromK2sUrl(String url) {
-    final id = _extractFileId(url);
+    final id = extractFileId(url);
     if (id != null) {
       final idx = url.indexOf(id);
       final rest = url.substring(idx + id.length);
@@ -858,6 +1058,13 @@ class _MainPageState extends State<MainPage> {
     }
     _saveRecent();
 
+    // Ensure link exists in tree data
+    if (_findLinkLocation(k2sUrl) == null && isK2sFileUrl(k2sUrl)) {
+      _appData.addSite('k2s.cc', 'file');
+      _appData.addLink('k2s.cc', 'file', k2sUrl);
+      _saveData();
+    }
+
     // Promote blue to green when playing
     _promoteBlueToGreen(k2sUrl);
 
@@ -896,9 +1103,7 @@ class _MainPageState extends State<MainPage> {
     final title = video?.title ?? k2sUrl;
     if (reason != null) {
       stderr.writeln('[player$playerIdx] $reason for "$title"');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$reason: $title')),
-      );
+      _showFlash('$reason: $title');
     }
 
     // Build sorted list before removing, to find next
@@ -949,9 +1154,7 @@ class _MainPageState extends State<MainPage> {
         } else {
           stderr.writeln('[player$playerIdx] error for "$k2sUrl" but connectivity is down, not removing');
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Playback failed — connection issue. Video kept in recents.')),
-            );
+            _showFlash('Playback failed — connection issue. Video kept in recents.');
           }
         }
       });
@@ -961,6 +1164,7 @@ class _MainPageState extends State<MainPage> {
   }
 
   Future<bool> _checkConnectivity() async {
+    if (kIsWeb) return false;
     try {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 5);
@@ -1052,8 +1256,29 @@ class _MainPageState extends State<MainPage> {
   // Tagging & Rating
   // ============================================================
 
-  void _onFrameRightClicked(int frame) {
+  Future<void> _onFrameRightClicked(int frame) async {
     // Popup shown in JS, no navigation needed
+    // Also add to recents without playing
+    final k2sUrl = _currentPreviewK2sUrl;
+    if (k2sUrl == null) return;
+
+    // Already in recents — nothing to do
+    if (_recentVideos.any((v) => v.k2sUrl == k2sUrl)) return;
+
+    final downloadUrl = await _getDownloadUrl(k2sUrl);
+    if (downloadUrl == null) return;
+
+    final title = _titleFromK2sUrl(k2sUrl);
+    final recent = RecentVideo(
+      k2sUrl: k2sUrl,
+      downloadUrl: downloadUrl,
+      title: title,
+      totalFrames: _currentPreviewTotalFrames,
+    );
+    recent.maxPosition = frame * 10.0;
+    setState(() { _recentVideos.add(recent); });
+    _saveRecent();
+    _showFlash('Added to recents: $title');
   }
 
   Future<void> _onFrameDoubleClicked(int frame) async {
@@ -1081,9 +1306,7 @@ class _MainPageState extends State<MainPage> {
     stderr.writeln('[tag] _onTagClicked frame=$frame tagKey=$tagKey k2sUrl=$k2sUrl');
     if (k2sUrl == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Tag: no preview URL')),
-        );
+        _showFlash('Tag: no preview URL');
       }
       return;
     }
@@ -1091,9 +1314,7 @@ class _MainPageState extends State<MainPage> {
     stderr.writeln('[tag] location=$location');
     if (location == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Tag: link not found in data for $k2sUrl')),
-        );
+        _showFlash('Tag: link not found in data for $k2sUrl');
       }
       return;
     }
@@ -1109,9 +1330,7 @@ class _MainPageState extends State<MainPage> {
     final tags = _appData.getTags(domain, path, k2sUrl);
     stderr.writeln('[tag] after addTag, tags=$tags totalFrames=${_playerTotalFrames}');
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Tag added: $tagKey at frame $frame (${tags.length} total)')),
-      );
+      _showFlash('Tag added: $tagKey at frame $frame (${tags.length} total)');
     }
     _saveData();
   }
@@ -1122,8 +1341,11 @@ class _MainPageState extends State<MainPage> {
     final location = _findLinkLocation(k2sUrl);
     if (location == null) return;
     final (domain, path) = location;
+    final targets = _rarGroupPartsFor(k2sUrl);
     setState(() {
-      _appData.setRating(domain, path, k2sUrl, rating);
+      for (final t in targets) {
+        _appData.setRating(domain, path, t, rating);
+      }
     });
     _saveData();
     // Auto-pick next random link
@@ -1131,10 +1353,28 @@ class _MainPageState extends State<MainPage> {
   }
 
   // ============================================================
+  // Flash message (centered overlay, fades quickly)
+  // ============================================================
+
+  String? _flashMessage;
+  Timer? _flashTimer;
+
+  void _showFlash(String message) {
+    if (!mounted) return;
+    _flashTimer?.cancel();
+    setState(() { _flashMessage = message; });
+    _flashTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() { _flashMessage = null; });
+    });
+  }
+
+  // ============================================================
   // Browser & URL
   // ============================================================
 
   void _loadUrl(String url) {
+    if (kIsWeb) return;
+    _currentPreviewK2sUrl = null;
     String urlToLoad = url;
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       urlToLoad = 'https://$url';
@@ -1142,12 +1382,17 @@ class _MainPageState extends State<MainPage> {
     _browserController.loadRequest(Uri.parse(urlToLoad));
   }
 
-  /// Returns a playable k2s URL: the browser URL if on a k2s page, or the selected tree link.
+  /// Returns a playable k2s URL: browser URL first, then preview, then selected tree link.
   String? get _playableK2sUrl {
-    if (_currentPreviewK2sUrl != null) return _currentPreviewK2sUrl;
-    if (_isK2sFileUrl(_currentUrl)) return _currentUrl;
-    if (_selectedLink != null && _isK2sFileUrl(_selectedLink!)) return _selectedLink;
+    if (isK2sFileUrl(_currentUrl)) return _currentUrl;
+    if (_currentPreviewK2sUrl != null && isK2sFileUrl(_currentPreviewK2sUrl!)) return _currentPreviewK2sUrl;
+    if (_treeSelection.link != null && isK2sFileUrl(_treeSelection.link!)) return _treeSelection.link;
     return null;
+  }
+
+  /// Whether the current context has a playable info video.
+  bool get _hasPlayableInfoVideo {
+    return _treeSelection.category == 'info' && _currentPreviewK2sUrl != null;
   }
 
   Future<void> _playK2sUrl() async {
@@ -1157,97 +1402,240 @@ class _MainPageState extends State<MainPage> {
     await _onFrameClicked(0);
   }
 
-  /// Build a navigable URL from a stored domain key and optional path.
-  /// Domain keys starting with "http://" use HTTP; otherwise HTTPS.
-  String _domainBaseUrl(String domain) {
-    if (domain.startsWith('http://')) return domain;
-    return 'https://$domain';
+  void _playCurrentInfoVideo() {
+    if (_currentPreviewK2sUrl == null) return;
+    final folder = _treeSelection.domain;
+    final name = _currentPreviewK2sUrl!.split('/').last;
+    // Reverse-engineer the path from the video URL
+    final urlPrefix = 'https://$_infoU:$_infoP@$_infoU.$_infoH/';
+    final path = _currentPreviewK2sUrl!.startsWith(urlPrefix)
+        ? _currentPreviewK2sUrl!.substring(urlPrefix.length)
+        : name;
+    _playInfoVideo(path, name, folder: folder);
   }
 
-  /// Extract the display label for a domain (strip protocol prefix if stored).
-  String _domainLabel(String domain) {
-    if (domain.startsWith('http://')) return domain.substring(7);
-    return domain;
+  // ============================================================
+  // Info video helpers
+  // ============================================================
+
+  String _buildInfoVideoUrl(String path) {
+    return 'https://$_infoU:$_infoP@$_infoU.$_infoH/$path';
   }
+
+  /// Ensure an AppData entry exists for an info link so tagging/rating works.
+  void _ensureInfoEntry(String folder, String videoUrl) {
+    if (_findLinkLocation(videoUrl) == null) {
+      _appData.addLink(folder, 'info', videoUrl);
+      _saveData();
+    }
+  }
+
+  void _showInfoPreview(String path, {String? folder}) {
+    if (kIsWeb) return;
+    final videoUrl = _buildInfoVideoUrl(path);
+    if (folder != null) {
+      _ensureInfoEntry(folder, videoUrl);
+    }
+    setState(() {
+      _currentPreviewK2sUrl = videoUrl;
+    });
+    final basename = path.split('/').last;
+    final escapedTitle = basename.replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+    final html = '''
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<style>
+  body { background: #222; color: #ddd; font: 14px sans-serif; margin: 0; padding: 8px; }
+  h3 { margin: 4px 0 8px; font-size: 14px; }
+  video { width: 100%; max-height: 80vh; background: #000; }
+</style>
+</head>
+<body>
+<h3>$escapedTitle</h3>
+<video controls autoplay>
+  <source src="$videoUrl" type="video/mp4">
+</video>
+</body>
+</html>
+''';
+    _browserController.loadHtmlString(html, baseUrl: 'https://$_infoU.$_infoH');
+  }
+
+  void _playInfoVideo(String path, String name, {String? folder}) {
+    final videoUrl = _buildInfoVideoUrl(path);
+    if (folder != null) {
+      _ensureInfoEntry(folder, videoUrl);
+    }
+    final playerIdx = _selectedPlayer;
+    _savePlayerPositions();
+
+    setState(() {
+      _playerK2sUrls[playerIdx] = videoUrl;
+      _playerDownloadUrls[playerIdx] = videoUrl;
+      _playerTotalFrames[playerIdx] = 0;
+    });
+
+    _playerOpenedAt[playerIdx] = DateTime.now();
+    _players[playerIdx].open(Media(videoUrl));
+    _playerFocusNodes[playerIdx].requestFocus();
+  }
+
+  Future<void> _downloadK2sUrl() async {
+    final url = _playableK2sUrl;
+    if (url == null) return;
+
+    final dir = await getApplicationDocumentsDirectory();
+    final keyPath = '${dir.path}/id_rsa';
+    final command = "echo '/mnt/data/deobro/get.sh $url' | ssh -i '$keyPath' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null onyx.n7s.co at now";
+    final log = <String>[command, ''];
+    _showLogPage(log);
+
+    try {
+      final result = await Process.run('/bin/bash', ['-c', command]);
+      log.add('Exit code: ${result.exitCode}');
+      if ((result.stdout as String).isNotEmpty) {
+        log.add('');
+        log.add(result.stdout as String);
+      }
+      if ((result.stderr as String).isNotEmpty) {
+        log.add('');
+        log.add(result.stderr as String);
+      }
+      log.add('');
+      log.add(result.exitCode == 0 ? 'Download scheduled.' : 'FAILED');
+      if (!mounted) return;
+      _showLogPage(log);
+      _showFlash(result.exitCode == 0 ? 'Download scheduled' : 'Download failed');
+    } catch (e) {
+      log.add('');
+      log.add('Error: $e');
+      if (!mounted) return;
+      _showLogPage(log);
+      _showFlash('Download error: $e');
+    }
+  }
+
 
   void _addCurrentSite() {
     final uri = Uri.tryParse(_currentUrl);
     if (uri == null) return;
 
-    // Preserve protocol for non-HTTPS sites
     final domain = uri.scheme == 'http' ? 'http://${uri.host}' : uri.host;
-    // Include query string in path
     var path = uri.path;
     if (uri.query.isNotEmpty) {
       path = '$path?${uri.query}';
     }
 
-    stderr.writeln('[add] url=$_currentUrl domain=$domain path=$path');
+    _addSiteWithPath(domain, path);
+  }
+
+  void _addSiteWithPath(String domain, String path) {
+    path = AppData.normalizePath(path);
+    stderr.writeln('[add] domain=$domain path=$path');
     setState(() {
       _appData.addSite(domain, path);
-      // Auto-expand tree to show the new site
-      _expandedCategories.add('fresh');
-      _expandedDomains.add('fresh\t$domain');
-      if (path.isNotEmpty && path != '/') {
-        _expandedPaths.add('$domain\t$path');
-      }
-      _selectedDomain = domain;
-      _selectedPath = (path.isNotEmpty && path != '/') ? path : null;
-      _selectedLink = null;
-      _clearPickScope();
     });
+    final effectivePath = (path.isNotEmpty && path != '/') ? path : null;
+    if (effectivePath != null) {
+      _treeKey.currentState?.navigateToLink(domain, effectivePath, '');
+    } else {
+      _treeKey.currentState?.selectLink(domain, '', '');
+    }
+    _treeKey.currentState?.clearPickScope();
     stderr.writeln('[add] domains=${_appData.domains} pathsFor($domain)=${_appData.pathsFor(domain)}');
     _saveData();
   }
 
-  Future<Map<String, bool>> _checkFilesAvailability(List<String> fileIds) async {
-    final result = <String, bool>{};
-    if (fileIds.isEmpty) return result;
+  void _addCurrentSiteWithDialog() {
+    final uri = Uri.tryParse(_currentUrl);
+    if (uri == null) return;
 
-    try {
-      final payload = <String, dynamic>{'ids': fileIds, 'extended_info': false};
-      final token = await _getK2sToken();
-      if (token != null) {
-        payload['auth_token'] = token;
+    final domain = uri.scheme == 'http' ? 'http://${uri.host}' : uri.host;
+    var defaultPath = uri.path;
+    if (uri.query.isNotEmpty) {
+      defaultPath = '$defaultPath?${uri.query}';
+    }
+
+    final controller = TextEditingController(text: defaultPath);
+    showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Add path to $domain'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '/path'),
+          onSubmitted: (_) => Navigator.of(ctx).pop(controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    ).then((path) {
+      if (path != null && path.isNotEmpty) {
+        _addSiteWithPath(domain, path);
       }
+    });
+  }
 
-      final client = HttpClient();
-      final request = await client.postUrl(Uri.parse('$_k2sApiBase/getFilesInfo'));
-      request.headers.contentType = ContentType.json;
-      request.write(json.encode(payload));
-      final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
-      client.close();
+  Future<(Map<String, bool>, Map<String, int>)> _checkFilesAvailability(List<String> fileIds) async {
+    final result = <String, bool>{};
+    final sizes = <String, int>{};
+    if (kIsWeb || fileIds.isEmpty) return (result, sizes);
 
-      final data = json.decode(body) as Map<String, dynamic>;
-      if (data['status'] == 'success') {
-        final files = data['files'] as List<dynamic>? ?? [];
-        for (final f in files) {
-          if (f is Map<String, dynamic>) {
-            final id = f['id'] as String?;
-            final available = f['is_available'] as bool? ?? false;
-            if (id != null) {
-              result[id] = available;
+    final token = await _getK2sToken();
+    const batchSize = 100;
+    for (int i = 0; i < fileIds.length; i += batchSize) {
+      final batch = fileIds.sublist(i, (i + batchSize).clamp(0, fileIds.length));
+      try {
+        final payload = <String, dynamic>{'ids': batch, 'extended_info': false};
+        if (token != null) {
+          payload['auth_token'] = token;
+        }
+
+        final client = HttpClient();
+        final request = await client.postUrl(Uri.parse('$_k2sApiBase/getFilesInfo'));
+        request.headers.contentType = ContentType.json;
+        request.write(json.encode(payload));
+        final response = await request.close();
+        final body = await response.transform(const Utf8Decoder(allowMalformed: true)).join();
+        client.close();
+
+        final data = json.decode(body) as Map<String, dynamic>;
+        if (data['status'] == 'success') {
+          final files = data['files'] as List<dynamic>? ?? [];
+          for (final f in files) {
+            if (f is Map<String, dynamic>) {
+              final id = f['id'] as String?;
+              final rawAvail = f['is_available'];
+              final available = rawAvail is bool ? rawAvail : rawAvail == 1 || rawAvail == '1' || rawAvail == 'true';
+              if (id != null) {
+                result[id] = available;
+                final rawSize = f['size'];
+                final size = rawSize is int ? rawSize : rawSize is double ? rawSize.toInt() : rawSize is String ? int.tryParse(rawSize) : null;
+                if (size != null) sizes[id] = size;
+              }
             }
           }
+        } else {
+          stderr.writeln('[k2s] getFilesInfo batch ${i ~/ batchSize + 1} failed: $data');
         }
-      } else {
-        stderr.writeln('[k2s] getFilesInfo failed: $data');
+      } catch (e) {
+        stderr.writeln('[k2s] getFilesInfo batch ${i ~/ batchSize + 1} error: $e');
       }
-    } catch (e) {
-      stderr.writeln('[k2s] getFilesInfo error: $e');
+      stderr.writeln('[k2s] getFilesInfo batch ${i ~/ batchSize + 1}: ${result.length} checked so far');
     }
-    return result;
+    return (result, sizes);
   }
 
-  bool _isK2sFileUrl(String url) {
-    return RegExp(r'https?://k2s\.cc/file/').hasMatch(url);
-  }
-
-  String? _extractFileId(String url) {
-    final match = RegExp(r'https?://k2s\.cc/file/([^/?]+)').firstMatch(url);
-    return match?.group(1);
-  }
 
   (String, String)? _findLinkLocation(String url) {
     for (final domain in _appData.data.keys) {
@@ -1260,9 +1648,24 @@ class _MainPageState extends State<MainPage> {
     return null;
   }
 
+  /// Return all sibling RAR part URLs if url belongs to a multi-part group, or [url] if standalone.
+  List<String> _rarGroupPartsFor(String url) {
+    final loc = _findLinkLocation(url);
+    if (loc == null) return [url];
+    final (domain, path) = loc;
+    final links = _appData.visibleLinksFor(domain, path);
+    final grouped = groupRarParts(links);
+    for (final item in grouped) {
+      if (item is RarGroup && item.parts.contains(url)) {
+        return item.parts;
+      }
+    }
+    return [url];
+  }
+
   /// Build a small sprite thumbnail widget for a k2s URL at a given position.
   Widget? _spriteThumbnail(String k2sUrl, double positionSec, {double? width, double? height, double size = 28}) {
-    final fileId = _extractFileId(k2sUrl);
+    final fileId = extractFileId(k2sUrl);
     if (fileId == null) return null;
     const gridSize = 5;
     const framesPerImage = gridSize * gridSize;
@@ -1298,31 +1701,85 @@ class _MainPageState extends State<MainPage> {
     );
   }
 
-  String _formatTime(int totalSeconds) {
-    final mm = totalSeconds ~/ 60;
-    final ss = totalSeconds % 60;
-    return '$mm:${ss.toString().padLeft(2, '0')}';
-  }
-
   /// Fetch a page via HTTP and extract all k2s file links from its HTML.
   Future<List<String>> _extractK2sLinksFromPage(String pageUrl) async {
+    if (kIsWeb) return [];
     try {
       final client = HttpClient();
       final request = await client.getUrl(Uri.parse(pageUrl));
+      request.headers.set('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36');
       final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode != 200) {
+        stderr.writeln('[deep] HTTP ${response.statusCode} for $pageUrl');
+        client.close();
+        return [];
+      }
+      final body = await response.transform(const Utf8Decoder(allowMalformed: true)).join();
       client.close();
-      // Find all http(s)://k2s.cc/file/... links in the HTML
-      final pattern = RegExp(r'https?://k2s\.cc/file/[^\s"<>]+');
+      // Find all http(s)://k2s.cc/file/... or keep2share.cc/file/... links in the HTML
+      final pattern = RegExp(r'https?://(k2s\.cc|keep2share\.cc)/file/[^\s"<>]+');
       return pattern.allMatches(body).map((m) => m.group(0)!).toSet().toList();
     } catch (e) {
-      stderr.writeln('[forum] Failed to fetch $pageUrl: $e');
+      stderr.writeln('[deep] Failed to fetch $pageUrl: $e');
       return [];
     }
   }
 
+  /// Deep extraction: find all same-site page links from the browser, then
+  /// fetch each via HTTP and collect k2s links from their HTML.
+  Future<(List<String>, Map<String, String>)> _deepExtractLinks(String origin) async {
+    // Step 1: extract all same-origin <a> hrefs from the current page
+    // Matches both relative URLs (resolved by browser) and absolute URLs with same origin
+    final jsCode = '''
+      (function() {
+        var pageHost = new URL(${json.encode(origin)}).hostname.replace(/^www\\./, '');
+        var seen = {};
+        var results = [];
+        var links = document.getElementsByTagName('a');
+        for (var i = 0; i < links.length; i++) {
+          var href = links[i].href;
+          if (!href) continue;
+          try {
+            var linkHost = new URL(href).hostname.replace(/^www\\./, '');
+            if (linkHost === pageHost && !seen[href]) {
+              seen[href] = true;
+              results.push(href);
+            }
+          } catch(e) {}
+        }
+        return JSON.stringify(results);
+      })()
+    ''';
+    final result = await _activeExtractController.runJavaScriptReturningResult(jsCode);
+    String resultString = result.toString();
+    if (resultString.startsWith('"') && resultString.endsWith('"')) {
+      resultString = resultString.substring(1, resultString.length - 1);
+      resultString = resultString.replaceAll(r'\"', '"');
+    }
+    final List<dynamic> pageUrls = json.decode(resultString);
+    stderr.writeln('[deep] Found ${pageUrls.length} same-site pages');
+
+    // Step 2: fetch each page and extract k2s links
+    final allK2sLinks = <String>[];
+    final linkToSourcePage = <String, String>{};
+    for (final pageUrl in pageUrls) {
+      final pageUrlStr = pageUrl.toString();
+      final links = await _extractK2sLinksFromPage(pageUrlStr);
+      if (links.isNotEmpty) {
+        stderr.writeln('[deep] $pageUrlStr: ${links.length} k2s links');
+        for (final link in links) {
+          allK2sLinks.add(link);
+          linkToSourcePage[link] = pageUrlStr;
+        }
+      }
+    }
+    stderr.writeln('[deep] Total: ${allK2sLinks.length} k2s links from ${pageUrls.length} pages');
+    return (allK2sLinks, linkToSourcePage);
+  }
+
   /// Extract links from the current browser page using JavaScript.
   Future<List<String>> _extractLinksFromBrowser() async {
+    if (kIsWeb) return [];
     final prefixesJson = json.encode(_extractPrefixes);
     final jsCode = '''
       (function() {
@@ -1358,7 +1815,7 @@ class _MainPageState extends State<MainPage> {
         return JSON.stringify(matchingHrefs);
       })()
     ''';
-    final result = await _browserController.runJavaScriptReturningResult(jsCode);
+    final result = await _activeExtractController.runJavaScriptReturningResult(jsCode);
     String resultString = result.toString();
     if (resultString.startsWith('"') && resultString.endsWith('"')) {
       resultString = resultString.substring(1, resultString.length - 1);
@@ -1370,7 +1827,7 @@ class _MainPageState extends State<MainPage> {
 
   /// Extract the filename portion from a k2s URL (after /file/<id>/).
   String _k2sLinkName(String url) {
-    final match = RegExp(r'https?://k2s\.cc/file/').firstMatch(url);
+    final match = RegExp(r'https?://(k2s\.cc|keep2share\.cc)/file/').firstMatch(url);
     if (match == null) return url;
     final rest = url.substring(match.end);
     final slashIdx = rest.indexOf('/');
@@ -1413,7 +1870,7 @@ class _MainPageState extends State<MainPage> {
     stderr.writeln('[extract] Starting extraction: ${hrefStrings.length} raw links for $domain $path');
     final urlToId = <String, String>{};
     for (final href in hrefStrings) {
-      final id = _extractFileId(href);
+      final id = extractFileId(href);
       if (id != null) {
         urlToId[href] = id;
       } else {
@@ -1439,13 +1896,16 @@ class _MainPageState extends State<MainPage> {
     stderr.writeln('[extract] ${dedupedUrls.length} unique file IDs after dedup');
 
     stderr.writeln('[extract] Checking availability for ${bestUrlForId.keys.length} IDs...');
-    final availability = await _checkFilesAvailability(bestUrlForId.keys.toList());
+    final (availability, fileSizes) = await _checkFilesAvailability(bestUrlForId.keys.toList());
     final availableCount = availability.values.where((v) => v).length;
     final unavailableCount = availability.values.where((v) => !v).length;
     stderr.writeln('[extract] Availability: $availableCount available, $unavailableCount unavailable');
 
     setState(() {
       _appData.addSite(domain, path);
+      // Ensure path exists even if addSite skips '/'
+      _appData.data.putIfAbsent(domain, () => {});
+      _appData.data[domain]!.putIfAbsent(path, () => {});
       int added = 0;
       int removed = 0;
       int deduped = 0;
@@ -1455,7 +1915,7 @@ class _MainPageState extends State<MainPage> {
       stderr.writeln('[extract] ${existingLinks.length} existing links in tree for this path');
       final existingById = <String, List<String>>{};
       for (final link in existingLinks) {
-        final id = _extractFileId(link);
+        final id = extractFileId(link);
         if (id != null) {
           existingById.putIfAbsent(id, () => []).add(link);
         }
@@ -1482,7 +1942,7 @@ class _MainPageState extends State<MainPage> {
         final currentLinks = _appData.linksFor(domain, path);
         final alreadyExists = currentLinks.contains(href);
         // Check if another URL for the same ID already exists
-        final existingForId = currentLinks.where((l) => _extractFileId(l) == id).toList();
+        final existingForId = currentLinks.where((l) => extractFileId(l) == id).toList();
 
         if (isAvailable) {
           if (existingForId.isNotEmpty && !alreadyExists) {
@@ -1505,10 +1965,13 @@ class _MainPageState extends State<MainPage> {
           } else {
             stderr.writeln('[extract] SKIP $id: already exists "${_k2sLinkName(href)}"');
           }
-          // Store source_page if provided
-          final targetUrl = _appData.linksFor(domain, path).where((l) => _extractFileId(l) == id).firstOrNull ?? href;
+          // Store source_page and file size if available
+          final targetUrl = _appData.linksFor(domain, path).where((l) => extractFileId(l) == id).firstOrNull ?? href;
           if (linkToSourcePage != null && linkToSourcePage.containsKey(href)) {
             _appData.setSourcePage(domain, path, targetUrl, linkToSourcePage[href]!);
+          }
+          if (fileSizes.containsKey(id)) {
+            _appData.setFileSize(domain, path, targetUrl, fileSizes[id]!);
           }
         } else {
           stderr.writeln('[extract] UNAVAILABLE $id: "${_k2sLinkName(href)}"');
@@ -1534,54 +1997,269 @@ class _MainPageState extends State<MainPage> {
         if (removed > 0) parts.add('$removed removed');
         if (deduped > 0) parts.add('$deduped duplicates merged');
         final summary = parts.isEmpty ? 'No changes' : parts.join(', ');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$summary (${hrefStrings.length} found)')),
-        );
+        _showFlash('$summary (${hrefStrings.length} found)');
       }
-      // Auto-expand tree to show extracted links in all relevant categories
-      for (final cat in ['fresh', 'rated', 'tagged']) {
-        _expandedCategories.add(cat);
-        _expandedDomains.add('$cat\t$domain');
-        // Also expand rating sub-groups under rated/tagged
-        if (cat == 'rated' || cat == 'tagged') {
-          for (int r = 1; r <= 4; r++) {
-            _expandedCategoryRatings.add('$cat\t$r');
-            _expandedDomains.add('$cat\t$r\t$domain');
-          }
-          if (cat == 'tagged') {
-            _expandedDomains.add('tagged\tunrated\t$domain');
-          }
-        }
-      }
-      _expandedPaths.add('$domain\t$path');
-      _selectedDomain = domain;
-      _selectedPath = path;
-      _selectedLink = null;
-      _clearPickScope();
+      // Navigate tree to show extracted links
+      _treeKey.currentState?.navigateToLink(domain, path, '');
+      _treeKey.currentState?.clearPickScope();
     });
     _saveData();
   }
 
-  Future<void> _extractLinks() async {
-    try {
-      final uri = Uri.tryParse(_currentUrl);
-      if (uri == null) return;
+  /// Compute the next page URL for pagination after extraction.
+  /// Handles `start=XXX` (+30) and `pageXXX` (+1) patterns.
+  /// Always matches the LAST occurrence in the URL.
+  String? _nextPageUrl(String url) {
+    // Match last start=XXX (query parameter)
+    final startPattern = RegExp(r'([\?&]start=)(\d+)');
+    final startMatches = startPattern.allMatches(url).toList();
+    if (startMatches.isNotEmpty) {
+      final lastMatch = startMatches.last;
+      final num = int.parse(lastMatch.group(2)!);
+      final before = url.substring(0, lastMatch.start);
+      final after = url.substring(lastMatch.end);
+      return '$before${lastMatch.group(1)}${num + 30}$after';
+    }
+    // Match last pageXXX in URL
+    final pagePattern = RegExp(r'(page)(\d+)');
+    final pageMatches = pagePattern.allMatches(url).toList();
+    if (pageMatches.isNotEmpty) {
+      final lastMatch = pageMatches.last;
+      final num = int.parse(lastMatch.group(2)!);
+      final before = url.substring(0, lastMatch.start);
+      final after = url.substring(lastMatch.end);
+      return '$before${lastMatch.group(1)}${num + 1}$after';
+    }
+    // Match /<number>/ at the end (e.g., .../page/3/ -> .../page/4/)
+    final slashNumSlash = RegExp(r'/(\d+)/$');
+    final slashMatch = slashNumSlash.firstMatch(url);
+    if (slashMatch != null) {
+      final num = int.parse(slashMatch.group(1)!);
+      return '${url.substring(0, slashMatch.start)}/${num + 1}/';
+    }
+    // Match trailing number in the path only (e.g., .../something3 -> .../something4)
+    // Strip query string so we don't match numeric query parameter values
+    final queryIndex = url.indexOf('?');
+    final pathPart = queryIndex >= 0 ? url.substring(0, queryIndex) : url;
+    final queryPart = queryIndex >= 0 ? url.substring(queryIndex) : '';
+    final trailingNum = RegExp(r'(\d+)$');
+    final trailMatch = trailingNum.firstMatch(pathPart);
+    if (trailMatch != null) {
+      final num = int.parse(trailMatch.group(1)!);
+      return '${pathPart.substring(0, trailMatch.start)}${num + 1}$queryPart';
+    }
+    return null;
+  }
 
-      final domain = uri.scheme == 'http' ? 'http://${uri.host}' : uri.host;
+  /// Extract the current page number from a URL.
+  int _currentPageNumber(String url) {
+    final startPattern = RegExp(r'[\?&]start=(\d+)');
+    final startMatches = startPattern.allMatches(url).toList();
+    if (startMatches.isNotEmpty) {
+      return int.parse(startMatches.last.group(1)!) ~/ 30 + 1;
+    }
+    final pagePattern = RegExp(r'page(\d+)');
+    final pageMatches = pagePattern.allMatches(url).toList();
+    if (pageMatches.isNotEmpty) {
+      return int.parse(pageMatches.last.group(1)!);
+    }
+    final slashNumSlash = RegExp(r'/(\d+)/$');
+    final slashMatch = slashNumSlash.firstMatch(url);
+    if (slashMatch != null) {
+      return int.parse(slashMatch.group(1)!);
+    }
+    final qIdx = url.indexOf('?');
+    final pathOnly = qIdx >= 0 ? url.substring(0, qIdx) : url;
+    final trailingNum = RegExp(r'(\d+)$');
+    final trailMatch = trailingNum.firstMatch(pathOnly);
+    if (trailMatch != null) {
+      return int.parse(trailMatch.group(1)!);
+    }
+    return 1;
+  }
+
+  /// Right-click extract: start/stop auto-extract loop through pages.
+  Future<void> _startExtractLoop() async {
+    if (kIsWeb) return;
+    if (_extractLooping) {
+      setState(() { _extractLooping = false; });
+      return;
+    }
+    final maxPage = int.tryParse(_extractLimitController.text) ?? 0;
+
+    // Create offscreen controller and load the current browser URL
+    _extractController = _createExtractController();
+    _extractUrl = '';
+    _extractController!.loadRequest(Uri.parse(_currentUrl));
+    try {
+      await _waitForExtractUrlChange('', const Duration(seconds: 30));
+    } catch (_) {
+      stderr.writeln('[extract-loop] Timeout loading initial page in offscreen');
+      _extractController = null;
+      return;
+    }
+    await Future.delayed(const Duration(seconds: 1));
+
+    setState(() { _extractLooping = true; });
+    int emptyStreak = 0;
+    while (_extractLooping) {
+      final url = _extractUrl;
+      setState(() { _extractLoopPage = _currentPageNumber(url); });
+      stderr.writeln('[extract-loop] Page $_extractLoopPage: $url');
+
+      int found = 0;
+      try {
+        found = await _extractLinks();
+      } catch (e) {
+        stderr.writeln('[extract-loop] Error: $e');
+      }
+      if (!_extractLooping) break;
+
+      // Track empty pages
+      if (found == 0) {
+        emptyStreak++;
+        stderr.writeln('[extract-loop] Empty page ($emptyStreak/3)');
+        if (emptyStreak >= 3) {
+          stderr.writeln('[extract-loop] 3 consecutive empty pages, stopping');
+          _showFlash('Stopped: 3 empty pages');
+          break;
+        }
+      } else {
+        emptyStreak = 0;
+      }
+
+      // _extractLinks already navigated to the next page. Wait for it to load.
+      final nextUrl = _nextPageUrl(url);
+      if (nextUrl == null) {
+        stderr.writeln('[extract-loop] No next page, stopping loop');
+        break;
+      }
+
+      // Wait until _extractUrl changes (offscreen page finished loading)
+      try {
+        await _waitForExtractUrlChange(url, const Duration(seconds: 30));
+      } catch (_) {
+        stderr.writeln('[extract-loop] Timeout waiting for page load');
+        break;
+      }
+      if (!_extractLooping) break;
+
+      // Check if next page number exceeds the limit (0 = unlimited)
+      if (maxPage > 0) {
+        final nextPageNum = _currentPageNumber(_extractUrl);
+        if (nextPageNum > maxPage) {
+          stderr.writeln('[extract-loop] Next page $nextPageNum > limit $maxPage, stopping');
+          _showFlash('Stopped: reached page $maxPage');
+          break;
+        }
+      }
+
+      // Let the page render before extracting
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    _extractController = null;
+    _extractUrl = '';
+    setState(() {
+      _extractLooping = false;
+      _extractLoopPage = 0;
+    });
+  }
+
+  /// Wait until _currentUrl differs from [originalUrl], polling every 500ms.
+  Future<void> _waitForUrlChange(String originalUrl, Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (_currentUrl == originalUrl) {
+      if (DateTime.now().isAfter(deadline)) {
+        throw TimeoutException('URL did not change', timeout);
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+  }
+
+  /// Check if a URL contains a page number pattern.
+  bool _hasPageNumber(String url) => _nextPageUrl(url) != null;
+
+  /// Extract links from the current page. Returns the number of raw links found.
+  /// Uses offscreen controller when _extractController is set (loop mode).
+  Future<int> _extractLinks() async {
+    if (kIsWeb) return 0;
+    try {
+      var uri = Uri.tryParse(_activeExtractUrl);
+      if (uri == null) return 0;
+
+      var domain = uri.scheme == 'http' ? 'http://${uri.host}' : uri.host;
       var path = uri.path;
       if (uri.query.isNotEmpty) {
         path = '$path?${uri.query}';
       }
+      path = AppData.normalizePath(path);
+
+      // If the current page is numbered and this page's path already has links, navigate to next and wait.
+      // Always check the URL's own path (not the selected path) so we don't skip unextracted pages.
+      if (_hasPageNumber(_activeExtractUrl) && _appData.linksFor(domain, path).isNotEmpty) {
+        final nextUrl = _nextPageUrl(_activeExtractUrl);
+        if (nextUrl != null) {
+          stderr.writeln('[extract] Path already has links, navigating to next: $nextUrl');
+          final oldUrl = _activeExtractUrl;
+          _loadExtractUrl(nextUrl);
+          if (_extractController != null) {
+            await _waitForExtractUrlChange(oldUrl, const Duration(seconds: 30));
+          } else {
+            await _waitForUrlChange(oldUrl, const Duration(seconds: 30));
+          }
+          await Future.delayed(const Duration(seconds: 1));
+          // Re-parse from the loaded URL
+          uri = Uri.tryParse(_activeExtractUrl);
+          if (uri == null) return 0;
+          domain = uri.scheme == 'http' ? 'http://${uri.host}' : uri.host;
+          path = uri.path;
+          if (uri.query.isNotEmpty) {
+            path = '$path?${uri.query}';
+          }
+          path = AppData.normalizePath(path);
+        }
+      }
+
+      // Keep mode: if path starts with /tags/ or /xfsearch/, extract content page links
+      final lowerPath = uri.path.toLowerCase();
+      if (lowerPath.startsWith('/tags/') || lowerPath.startsWith('/xfsearch/')) {
+        final origin = '${uri.scheme}://${uri.host}';
+        final extractUrl = _activeExtractUrl;
+        int found = 0;
+        try {
+          found = await _extractKeepLinks(origin, domain, path);
+        } catch (e) {
+          stderr.writeln('[keep] Error in keep extraction: $e');
+        }
+        final nextUrl = _nextPageUrl(extractUrl);
+        stderr.writeln('[keep] URL: $extractUrl, next URL: $nextUrl');
+        if (nextUrl != null) {
+          _loadExtractUrl(nextUrl);
+        }
+        return found;
+      }
 
       // Forum mode: if path contains /viewforum.php (case-insensitive), follow topic links
       if (uri.path.toLowerCase().contains('/viewforum.php')) {
-        await _extractForumLinks(domain, path, uri);
-        return;
+        final extractUrl = _activeExtractUrl;
+        int found = 0;
+        try {
+          found = await _extractForumLinks(domain, path, uri);
+        } catch (e) {
+          stderr.writeln('Error in forum extraction: $e');
+        }
+        // Auto-navigate to next page (always, even if nothing found or error)
+        final nextUrl = _nextPageUrl(extractUrl);
+        stderr.writeln('[extract] Forum URL: $extractUrl, next URL: $nextUrl');
+        if (nextUrl != null) {
+          _loadExtractUrl(nextUrl);
+        }
+        return found;
       }
 
       // Save page HTML for debugging
       try {
-        final html = await _browserController.runJavaScriptReturningResult('document.documentElement.outerHTML');
+        final html = await _activeExtractController.runJavaScriptReturningResult('document.documentElement.outerHTML');
         String htmlStr = html.toString();
         if (htmlStr.startsWith('"') && htmlStr.endsWith('"')) {
           htmlStr = htmlStr.substring(1, htmlStr.length - 1);
@@ -1596,11 +2274,63 @@ class _MainPageState extends State<MainPage> {
       }
 
       // Standard extraction: scan current page for k2s links
-      final hrefStrings = await _extractLinksFromBrowser();
-      final linkToSourcePage = {for (final href in hrefStrings) href: _currentUrl};
-      await _addExtractedLinks(domain, path, hrefStrings, linkToSourcePage: linkToSourcePage);
+      // For paginated URLs, always use the URL's own path so each page gets its own tree node.
+      // For non-paginated URLs, use the selected path if one is selected in the tree.
+      // Also create '/' as an empty path so prefix grouping makes it the parent.
+      final hasPage = _hasPageNumber(_activeExtractUrl);
+      final useSelectedPath = !hasPage && _treeSelection.path != null && _treeSelection.domain == domain;
+      final extractUrl = _activeExtractUrl;
+      int found = 0;
+      try {
+        // Always extract k2s links from the current page first
+        final hrefStrings = await _extractLinksFromBrowser();
+        final linkToSourcePage = {for (final href in hrefStrings) href: extractUrl};
+        // Group links by their target path: selected path or current URL path
+        final currentPagePath = useSelectedPath ? _treeSelection.path! : path;
+        final linksByPath = <String, List<String>>{currentPagePath: List.from(hrefStrings)};
+        final allLinkToSourcePage = Map<String, String>.from(linkToSourcePage);
+        if (_deepExtract) {
+          // Deep: also follow all same-site links and extract k2s links from each
+          // All deep links are stored under the parent page's path (not each source page's path)
+          final origin = '${uri.scheme}://${uri.host}';
+          final (deepLinks, deepSourcePages) = await _deepExtractLinks(origin);
+          for (final link in deepLinks) {
+            if (!allLinkToSourcePage.containsKey(link)) {
+              linksByPath.putIfAbsent(currentPagePath, () => []).add(link);
+            }
+            allLinkToSourcePage.putIfAbsent(link, () => deepSourcePages[link] ?? extractUrl);
+          }
+        }
+        // Ensure domain exists
+        if (!useSelectedPath) {
+          setState(() {
+            _appData.data.putIfAbsent(domain, () => {});
+          });
+        }
+        // Add links grouped by their target path
+        for (final entry in linksByPath.entries) {
+          final targetPath = entry.key;
+          final links = entry.value;
+          if (links.isEmpty) continue;
+          found += links.length;
+          stderr.writeln('[extract] Adding ${links.length} links to $domain path=$targetPath');
+          await _addExtractedLinks(domain, targetPath, links, linkToSourcePage: allLinkToSourcePage);
+          stderr.writeln('[extract] After add: ${_appData.linksFor(domain, targetPath).length} links in tree for $domain $targetPath');
+        }
+      } catch (e) {
+        stderr.writeln('Error extracting links: $e');
+      }
+
+      // Auto-navigate to next page (always, even if nothing found or error)
+      final nextUrl = _nextPageUrl(extractUrl);
+      stderr.writeln('[extract] Current URL: $extractUrl, next URL: $nextUrl');
+      if (nextUrl != null) {
+        _loadExtractUrl(nextUrl);
+      }
+      return found;
     } catch (e) {
-      stderr.writeln('Error extracting links: $e');
+      stderr.writeln('Error in extract: $e');
+      return 0;
     }
   }
 
@@ -1608,13 +2338,14 @@ class _MainPageState extends State<MainPage> {
   /// Fetch a source page and display all its external images as a preview.
   /// Fetch source page, extract images and links, render custom preview, scroll to the k2s link.
   Future<void> _showSourcePage(String sourcePageUrl, String k2sUrl) async {
+    if (kIsWeb) return;
     stderr.writeln('[preview] Fetching source page: $sourcePageUrl for $k2sUrl');
-    final fileId = _extractFileId(k2sUrl) ?? '';
+    final fileId = extractFileId(k2sUrl) ?? '';
     try {
       final client = HttpClient();
       final request = await client.getUrl(Uri.parse(sourcePageUrl));
       final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
+      final body = await response.transform(const Utf8Decoder(allowMalformed: true)).join();
       client.close();
 
       // Extract images
@@ -1631,7 +2362,7 @@ class _MainPageState extends State<MainPage> {
       }
 
       // Extract k2s links
-      final linkPattern = RegExp(r'https://k2s\.cc/file/[^\s"<>]+', caseSensitive: false);
+      final linkPattern = RegExp(r'https?://k2s\.cc/file/[^\s"<>]+', caseSensitive: false);
       final k2sLinks = <String>{};
       for (final match in linkPattern.allMatches(body)) {
         k2sLinks.add(match.group(0)!);
@@ -1645,14 +2376,19 @@ class _MainPageState extends State<MainPage> {
       ).join('\n');
 
       final linkTags = k2sLinks.map((l) {
-        final id = _extractFileId(l) ?? '';
-        final name = _linkLabel(l).replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+        final id = extractFileId(l) ?? '';
+        var name = linkLabel(l).replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+        final loc = _findLinkLocation(l);
+        if (loc != null) {
+          final sz = _appData.getFileSize(loc.$1, loc.$2, l);
+          if (sz != null) name = '${formatFileSize(sz)} $name';
+        }
         final isTarget = id == fileId;
         return '<div class="k2s-link${isTarget ? ' target' : ''}" ${isTarget ? 'id="target-link"' : ''} data-url="${l.replaceAll('"', '&quot;')}">'
             '<a href="$l" style="color:#4fc3f7;font:13px sans-serif;text-decoration:none;">$name</a></div>';
       }).join('\n');
 
-      final fallbackTitle = _linkLabel(k2sUrl).replaceAll("'", "\\'").replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+      final fallbackTitle = linkLabel(k2sUrl).replaceAll("'", "\\'").replaceAll('&', '&amp;').replaceAll('<', '&lt;');
 
       final html = '''
 <!DOCTYPE html>
@@ -1720,6 +2456,7 @@ document.querySelectorAll('.k2s-link').forEach(function(div) {
   }
 
   void _showLogPage(List<String> logLines) {
+    if (kIsWeb) return;
     final escaped = logLines.map((l) =>
         l.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')).join('<br>');
     final html = '''
@@ -1732,8 +2469,108 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
     _browserController.loadHtmlString(html, baseUrl: 'https://static-cache.k2s.cc');
   }
 
+  /// Keep extraction: find <origin>/<number>-*.html links, fetch each,
+  /// POST to reveal hidden k2s links, add them to the tree.
+  Future<int> _extractKeepLinks(String origin, String domain, String path) async {
+    if (kIsWeb) return 0;
+    // Step 1: find content page links from the current browser page
+    // Matches both www. and non-www. variants of the origin
+    final jsCode = '''
+      (function() {
+        var origin = ${json.encode(origin)};
+        var pageHost = new URL(origin).hostname.replace(/^www\\./, '');
+        var seen = {};
+        var results = [];
+        var container = document.getElementById('midside');
+        if (!container) container = document;
+        var links = container.getElementsByTagName('a');
+        for (var i = 0; i < links.length; i++) {
+          var href = links[i].href;
+          if (!href) continue;
+          try {
+            var linkHost = new URL(href).hostname.replace(/^www\\./, '');
+            if (linkHost === pageHost && /\\/\\d+-[^/]*\\.html/.test(href) && !seen[href]) {
+              seen[href] = true;
+              results.push(href);
+            }
+          } catch(e) {}
+        }
+        return JSON.stringify(results);
+      })()
+    ''';
+    final result = await _activeExtractController.runJavaScriptReturningResult(jsCode);
+    String resultString = result.toString();
+    if (resultString.startsWith('"') && resultString.endsWith('"')) {
+      resultString = resultString.substring(1, resultString.length - 1);
+      resultString = resultString.replaceAll(r'\"', '"');
+    }
+    final List<dynamic> contentUrls = json.decode(resultString);
+    stderr.writeln('[keep] Found ${contentUrls.length} content pages');
+
+    // Step 2: fetch each content page, find button with data-id/data-hash,
+    // POST to show.php to reveal hidden links, collect k2s links
+    final allK2sLinks = <String>[];
+    final linkToSourcePage = <String, String>{};
+    final k2sPattern = RegExp(r'https?://(k2s\.cc|keep2share\.cc)/file/[^\s"<>]+');
+
+    for (final pageUrl in contentUrls) {
+      final pageUrlStr = pageUrl.toString();
+      stderr.writeln(pageUrlStr);
+      try {
+        final client = HttpClient();
+        final pageUri = Uri.parse(pageUrlStr);
+        final request = await client.getUrl(pageUri);
+        final response = await request.close();
+        final body = await response.transform(const Utf8Decoder(allowMalformed: true)).join();
+
+        // Find button with data-id and data-hash attributes (either order)
+        String? dataId, dataHash;
+        final m1 = RegExp(r'data-id="(\d+)"[^>]*data-hash="([^"]+)"').firstMatch(body);
+        if (m1 != null) {
+          dataId = m1.group(1)!;
+          dataHash = m1.group(2)!;
+        } else {
+          final m2 = RegExp(r'data-hash="([^"]+)"[^>]*data-id="(\d+)"').firstMatch(body);
+          if (m2 != null) {
+            dataHash = m2.group(1)!;
+            dataId = m2.group(2)!;
+          }
+        }
+
+        // First, look for k2s links directly in the page body
+        var links = k2sPattern.allMatches(body).map((m) => m.group(0)!).toSet().toList();
+
+        // If no direct links found, try the data-id/data-hash button POST method
+        if (links.isEmpty && dataId != null && dataHash != null) {
+          final postUri = Uri.parse('${pageUri.scheme}://${pageUri.host}/engine/mods/click_hide/show.php');
+          final postReq = await client.postUrl(postUri);
+          postReq.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
+          postReq.write('id=$dataId&hash=$dataHash&div=1');
+          final postResp = await postReq.close();
+          final postBody = await postResp.transform(const Utf8Decoder(allowMalformed: true)).join();
+          links = k2sPattern.allMatches(postBody).map((m) => m.group(0)!).toSet().toList();
+        }
+        for (final link in links) {
+          stderr.writeln(link);
+          allK2sLinks.add(link);
+          linkToSourcePage[link] = pageUrlStr;
+        }
+        client.close();
+      } catch (e) {
+        stderr.writeln('[keep]   error: $e');
+      }
+    }
+
+    // Step 3: add collected links to the tree
+    if (allK2sLinks.isNotEmpty) {
+      await _addExtractedLinks(domain, path, allK2sLinks, linkToSourcePage: linkToSourcePage);
+    }
+    return allK2sLinks.length;
+  }
+
   /// Forum extraction: find /viewtopic.php links, fetch each, extract k2s links.
-  Future<void> _extractForumLinks(String domain, String path, Uri forumUri) async {
+  Future<int> _extractForumLinks(String domain, String path, Uri forumUri) async {
+    if (kIsWeb) return 0;
     // Step 1: extract topic links from the current page BEFORE replacing it with log
     final jsCode = '''
       (function() {
@@ -1748,7 +2585,7 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
         return JSON.stringify([...new Set(topics)]);
       })()
     ''';
-    final result = await _browserController.runJavaScriptReturningResult(jsCode);
+    final result = await _activeExtractController.runJavaScriptReturningResult(jsCode);
     String resultString = result.toString();
     if (resultString.startsWith('"') && resultString.endsWith('"')) {
       resultString = resultString.substring(1, resultString.length - 1);
@@ -1756,12 +2593,14 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
     resultString = resultString.replaceAll(r'\"', '"').replaceAll(r'\\', '\\');
     final List<dynamic> topicUrls = json.decode(resultString);
 
-    // Now show the log page
+    // Show log page only when not using offscreen controller (user can browse)
     final log = <String>[];
     void addLog(String msg) {
       log.add(msg);
       stderr.writeln('[forum] $msg');
-      _showLogPage(log);
+      if (_extractController == null) {
+        _showLogPage(log);
+      }
     }
 
     addLog('Forum extraction: $forumUri');
@@ -1769,7 +2608,7 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
 
     if (topicUrls.isEmpty) {
       addLog('No topics to process.');
-      return;
+      return 0;
     }
 
     // Step 2: fetch each topic page and extract k2s links
@@ -1797,35 +2636,99 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
     await _addExtractedLinks(domain, path, allK2sLinks, linkToSourcePage: linkToSourcePage);
 
     addLog('Done.');
+    return allK2sLinks.length;
   }
 
   void _removeSelected() {
-    if (_selectedLink != null && _selectedPath != null && _selectedDomain != null) {
+    final sel = _treeSelection;
+    if (sel.link != null && sel.path != null && sel.domain != null) {
       setState(() {
-        _appData.removeLink(_selectedDomain!, _selectedPath!, _selectedLink!);
-        _selectedLink = null;
+        _appData.removeLink(sel.domain!, sel.path!, sel.link!);
       });
       _saveData();
-    } else if (_selectedPath != null && _selectedDomain != null) {
-      _showConfirmDialog('Remove path "$_selectedPath" and all its links?', () {
+    } else if (sel.path != null && sel.domain != null) {
+      _showConfirmDialog('Remove path "${sel.path}" and all its links?', () {
         setState(() {
-          _appData.removePath(_selectedDomain!, _selectedPath!);
-          _selectedPath = null;
-          _selectedLink = null;
+          _appData.removePath(sel.domain!, sel.path!);
         });
         _saveData();
       });
-    } else if (_selectedDomain != null) {
-      _showConfirmDialog('Remove website "$_selectedDomain" and all its content?', () {
+    } else if (sel.domain != null) {
+      _showConfirmDialog('Remove website "${sel.domain}" and all its content?', () {
         setState(() {
-          _appData.removeDomain(_selectedDomain!);
-          _selectedDomain = null;
-          _selectedPath = null;
-          _selectedLink = null;
+          _appData.removeDomain(sel.domain!);
         });
         _saveData();
       });
     }
+  }
+
+  void _removeBySubstring() {
+    if (_treeSelection.domain == null) return;
+    final controller = TextEditingController();
+    showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove links by name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Substring to match in link name'),
+          onSubmitted: (_) => Navigator.of(ctx).pop(controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('Find'),
+          ),
+        ],
+      ),
+    ).then((substring) {
+      if (substring == null || substring.isEmpty) return;
+      final sub = substring.toLowerCase();
+      final allLinks = <(String, String, String)>[];
+      final sel = _treeSelection;
+      final domain = sel.domain!;
+      if (sel.path != null) {
+        for (final link in _appData.linksFor(domain, sel.path!)) {
+          allLinks.add((domain, sel.path!, link));
+        }
+      } else if (sel.groupPaths != null) {
+        for (final path in sel.groupPaths!) {
+          for (final link in _appData.linksFor(domain, path)) {
+            allLinks.add((domain, path, link));
+          }
+        }
+      } else {
+        for (final path in _appData.pathsFor(domain)) {
+          for (final link in _appData.linksFor(domain, path)) {
+            allLinks.add((domain, path, link));
+          }
+        }
+      }
+      final matching = allLinks.where((t) => _k2sLinkName(t.$3).toLowerCase().contains(sub)).toList();
+      if (matching.isEmpty) {
+        _showFlash('No links found matching "$substring"');
+        return;
+      }
+      _showConfirmDialog(
+        'Found ${matching.length} links with "$substring" out of ${allLinks.length} links. Remove them?',
+        () {
+          setState(() {
+            for (final (d, p, l) in matching) {
+              _appData.removeLink(d, p, l);
+              _recentVideos.removeWhere((v) => v.k2sUrl == l);
+            }
+          });
+          _saveData();
+          _showFlash('Removed ${matching.length} links');
+        },
+      );
+    });
   }
 
   void _showConfirmDialog(String message, VoidCallback onConfirm) {
@@ -1859,18 +2762,32 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
   void _clearPickScope() {
     _pickScopeDomain = null;
     _pickScopePath = null;
+    _pickScopeGroupPaths = null;
+    _treeKey.currentState?.clearPickScope();
   }
 
   void _pickRandomLink() {
+    // If a search collection is selected, pick from its matches
+    if (_treeSelection.searchIndex != null && _treeSelection.searchIndex! < _searchResults.length) {
+      final (_, matches) = _searchResults[_treeSelection.searchIndex!];
+      if (matches.isEmpty) return;
+      final links = matches.map((m) => m.$3).toList();
+      final picked = links[DateTime.now().millisecondsSinceEpoch % links.length];
+      _previewLink(picked);
+      return;
+    }
+
     // Save the pick scope from current selection (only if not already in a pick session)
-    if (_pickScopeDomain == null && _pickScopePath == null) {
-      _pickScopeDomain = _selectedDomain;
-      _pickScopePath = _selectedPath;
+    if (_pickScopeDomain == null && _pickScopePath == null && _pickScopeGroupPaths == null) {
+      _pickScopeDomain = _treeSelection.domain;
+      _pickScopePath = _treeSelection.path;
+      _pickScopeGroupPaths = _treeSelection.groupPaths;
     }
 
     // Use the saved pick scope for collecting links
     final scopeDomain = _pickScopeDomain;
     final scopePath = _pickScopePath;
+    final scopeGroupPaths = _pickScopeGroupPaths;
 
     final links = <String>[];
     final data = _appData.data;
@@ -1894,7 +2811,12 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
       }
     }
 
-    if (scopePath != null && scopeDomain != null) {
+    if (scopeGroupPaths != null && scopeDomain != null) {
+      // Group scope: collect from all paths in the group
+      for (final path in scopeGroupPaths) {
+        collectFromPath(scopeDomain, path);
+      }
+    } else if (scopePath != null && scopeDomain != null) {
       collectFromPath(scopeDomain, scopePath);
     } else if (scopeDomain != null) {
       collectFromDomain(scopeDomain);
@@ -1940,13 +2862,14 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
   // ============================================================
 
   Future<void> _previewLink(String url) async {
-    if (!_isK2sFileUrl(url)) {
+    if (kIsWeb) return;
+    if (!isK2sFileUrl(url)) {
       stderr.writeln('[preview] Not a k2s file URL: $url');
       _loadUrl(url);
       return;
     }
 
-    final fileId = _extractFileId(url)!;
+    final fileId = extractFileId(url)!;
     stderr.writeln('[preview] fileId=$fileId from url=$url');
 
     _currentPreviewK2sUrl = url;
@@ -1995,7 +2918,7 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
     }
 
     final totalFrames = imageUrls.length * 25;
-    final previewTitle = _linkLabel(url).replaceAll("'", "\\'").replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+    final previewTitle = linkLabel(url).replaceAll("'", "\\'").replaceAll('&', '&amp;').replaceAll('<', '&lt;');
     // Get rating for the preview
     int? previewRating;
     final previewLoc = _findLinkLocation(url);
@@ -2003,6 +2926,7 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
       final (d, p) = previewLoc;
       previewRating = _appData.getRating(d, p, url);
     }
+    final isPreviewVr = previewLoc != null && _appData.getVr(previewLoc.$1, previewLoc.$2, url);
     final ratingColorsHex = ['#f44336', '#ffeb3b', '#4caf50', '#2196f3', '#9e9e9e'];
     final ratingLabels = ['Super', 'Top', 'Ok', 'Uhm', 'Bad'];
     final ratingDotsHtml = List.generate(5, (i) {
@@ -2010,13 +2934,33 @@ body{margin:0;padding:12px;background:#111;color:#0f0;font:13px monospace;white-
       final border = active ? '2px solid #fff' : '1px solid #666';
       return '<span class="rate-dot" data-rating="${i+1}" style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${ratingColorsHex[i]};border:$border;cursor:pointer;margin:0 1px;" title="${ratingLabels[i]}"></span>';
     }).join('');
+    // VR sprites: show only left half, stretched to full width
+    final imgStyle = isPreviewVr
+        ? 'width:200%;max-width:200%;display:block;margin:0 auto;cursor:crosshair;'
+        : 'max-width:100%;display:block;margin:0 auto;cursor:crosshair;';
+    final containerStyle = isPreviewVr
+        ? 'overflow:hidden;width:100%;'
+        : '';
     final imgTags = imageUrls
         .asMap()
         .entries
-        .map((e) => '<img data-idx="${e.key}" src="${e.value}" style="max-width:100%;display:block;margin:0 auto 8px auto;cursor:crosshair;">')
+        .map((e) => '<div class="sprite-container" style="$containerStyle"><img data-idx="${e.key}" src="${e.value}" style="$imgStyle"></div>')
         .join('\n');
     // Build JSON array of sprite URLs for JS
     final spriteUrlsJson = imageUrls.map((u) => '"$u"').join(',');
+    // Build JSON array of existing tags for overlay
+    final existingTags = <Map<String, dynamic>>[];
+    if (previewLoc != null) {
+      final (d, p) = previewLoc;
+      existingTags.addAll(_appData.getTags(d, p, url));
+    }
+    final tagsJson = existingTags.map((t) {
+      final tagKey = t['tag'] as String;
+      final frame = t['frame'] as int;
+      final emojiIdx = kTagKeys.indexOf(tagKey);
+      final emoji = emojiIdx >= 0 ? kTagEmojis[emojiIdx] : '?';
+      return '{"frame":$frame,"emoji":"$emoji"}';
+    }).join(',');
     final html = '''
 <!DOCTYPE html>
 <html>
@@ -2046,6 +2990,9 @@ body{margin:0;padding:0;background:#111;}
 #tagpopup .tag:hover{transform:scale(1.3);}
 #tagpopup .rate{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:bold;color:#fff;cursor:pointer;}
 #tagpopup .rate:hover{transform:scale(1.3);}
+.sprite-container{position:relative;display:inline-block;width:100%;}
+.sprite-container img{display:block;width:100%;}
+.tag-marker{position:absolute;font-size:14px;text-shadow:0 0 3px #000,0 0 6px #000;pointer-events:none;z-index:10;}
 </style></head>
 <body>
 <div id="speedbar">
@@ -2078,6 +3025,7 @@ $imgTags
 var gridSize = 5;
 var framesPerImage = gridSize * gridSize;
 var totalFrames = $totalFrames;
+var isVr = ${isPreviewVr ? 'true' : 'false'};
 var spriteUrls = [$spriteUrlsJson];
 var previewTimer = null;
 var previewFrame = 0;
@@ -2120,8 +3068,14 @@ function showPreviewFrame() {
   var col = posInSprite % gridSize;
   var url = spriteUrls[spriteIdx];
   playerFrame.style.backgroundImage = 'url(' + url + ')';
-  playerFrame.style.backgroundSize = (gridSize * 100) + '% ' + (gridSize * 100) + '%';
-  playerFrame.style.backgroundPosition = (col * 100 / (gridSize - 1)) + '% ' + (row * 100 / (gridSize - 1)) + '%';
+  if (isVr) {
+    // VR: show left half of cell — double horizontal zoom, offset to left half
+    playerFrame.style.backgroundSize = (gridSize * 200) + '% ' + (gridSize * 100) + '%';
+    playerFrame.style.backgroundPosition = (col * 200 / (gridSize * 2 - 1)) + '% ' + (row * 100 / (gridSize - 1)) + '%';
+  } else {
+    playerFrame.style.backgroundSize = (gridSize * 100) + '% ' + (gridSize * 100) + '%';
+    playerFrame.style.backgroundPosition = (col * 100 / (gridSize - 1)) + '% ' + (row * 100 / (gridSize - 1)) + '%';
+  }
   var secs = previewFrame * 10;
   var mm = Math.floor(secs / 60);
   var ss = secs % 60;
@@ -2238,7 +3192,9 @@ function calcFrame(img, e) {
   var rect = img.getBoundingClientRect();
   var x = e.clientX - rect.left;
   var y = e.clientY - rect.top;
-  var col = Math.floor(x / rect.width * gridSize);
+  // In VR mode, image is 200% width so rect.width is 2x container; double x ratio
+  var xRatio = isVr ? (x / rect.width * 2) : (x / rect.width);
+  var col = Math.floor(xRatio * gridSize);
   var row = Math.floor(y / rect.height * gridSize);
   if (col >= gridSize) col = gridSize - 1;
   if (row >= gridSize) row = gridSize - 1;
@@ -2265,6 +3221,23 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
     if (window.FrameRightClick) FrameRightClick.postMessage('' + frame);
   });
 });
+
+// Overlay existing tag emojis on sprite grids
+var existingTags = [$tagsJson];
+existingTags.forEach(function(t) {
+  var spriteIdx = Math.floor(t.frame / framesPerImage);
+  var posInSprite = t.frame % framesPerImage;
+  var row = Math.floor(posInSprite / gridSize);
+  var col = posInSprite % gridSize;
+  var container = document.querySelectorAll('.sprite-container')[spriteIdx];
+  if (!container) return;
+  var marker = document.createElement('span');
+  marker.className = 'tag-marker';
+  marker.textContent = t.emoji;
+  marker.style.left = isVr ? (col / gridSize * 200) + '%' : (col / gridSize * 100) + '%';
+  marker.style.top = (row / gridSize * 100) + '%';
+  container.appendChild(marker);
+});
 </script>
 </body>
 </html>
@@ -2274,28 +3247,16 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
   }
 
 
-  /// Extract display label for a k2s link
-  String _linkLabel(String url) {
-    final id = _extractFileId(url);
-    if (id != null) {
-      final idx = url.indexOf(id);
-      final rest = url.substring(idx + id.length);
-      if (rest.startsWith('/') && rest.length > 1) {
-        return rest.substring(1);
-      }
-      return id;
-    }
-    return url;
-  }
-
   // ============================================================
   // Build UI
   // ============================================================
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: LayoutBuilder(
+    return Stack(
+      children: [
+        Scaffold(
+          body: LayoutBuilder(
         builder: (context, constraints) {
           final totalWidth = constraints.maxWidth;
           final totalHeight = constraints.maxHeight;
@@ -2307,7 +3268,9 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
               // Left pane
               SizedBox(
                 width: leftWidth,
-                child: _buildLeftPane(leftWidth, totalHeight),
+                child: _recentsServerActive
+                    ? _buildServerLeftPane(leftWidth, totalHeight)
+                    : _buildLeftPane(leftWidth, totalHeight),
               ),
               // Vertical divider (draggable)
               GestureDetector(
@@ -2328,12 +3291,42 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
               // Right pane
               SizedBox(
                 width: rightWidth,
-                child: _buildRightPane(rightWidth, totalHeight),
+                child: _recentsServerActive
+                    ? _buildBrowser()
+                    : _buildRightPane(rightWidth, totalHeight),
               ),
             ],
           );
         },
       ),
+    ),
+    if (_flashMessage != null)
+      Positioned.fill(
+        child: IgnorePointer(
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(_flashMessage!,
+                style: const TextStyle(color: Colors.white, fontSize: 14, decoration: TextDecoration.none, fontWeight: FontWeight.normal),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ],
+    );
+  }
+
+  Widget _buildServerLeftPane(double width, double totalHeight) {
+    return MediaQuery(
+      data: MediaQuery.of(context).copyWith(
+        textScaler: const TextScaler.linear(2.0),
+      ),
+      child: _buildTreeView(),
     );
   }
 
@@ -2415,7 +3408,23 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
     return _appData.getRating(domain, path, k2sUrl);
   }
 
+  bool _getVrForK2sUrl(String k2sUrl) {
+    final location = _findLinkLocation(k2sUrl);
+    if (location == null) return false;
+    final (domain, path) = location;
+    return _appData.getVr(domain, path, k2sUrl);
+  }
+
   Widget _buildVideoPlayer(int index) {
+    if (kIsWeb) {
+      return Container(
+        color: Colors.black,
+        child: const Center(
+          child: Text('Video player not available on web',
+              style: TextStyle(color: Colors.white54)),
+        ),
+      );
+    }
     final currentK2sUrl = _playerK2sUrls[index];
     final validRecentAll = _recentVideos.where((v) => !v.isExpired && _getRatingForK2sUrl(v.k2sUrl) != 5).toList();
     // Deduplicate by k2sUrl (keep first occurrence)
@@ -2426,7 +3435,8 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
     }
     // If current video is not in the filtered list, don't set it as dropdown value
     final dropdownValue = (currentK2sUrl != null && validRecent.any((v) => v.k2sUrl == currentK2sUrl))
-        ? currentK2sUrl : null;
+        ? currentK2sUrl : '__empty__';
+    final isVr = currentK2sUrl != null && _getVrForK2sUrl(currentK2sUrl);
     // Sort: % mode = completion then rating; 👍 mode = rating then completion
     validRecent.sort((a, b) {
       final ra = _getRatingForK2sUrl(a.k2sUrl) ?? 99;
@@ -2471,7 +3481,12 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                     itemHeight: null,
                     hint: const Text('Select video...', style: TextStyle(fontSize: 12)),
                     value: dropdownValue,
-                    items: validRecent.map((v) {
+                    items: <DropdownMenuItem<String>>[
+                      DropdownMenuItem<String>(
+                        value: '__empty__',
+                        child: Text('Empty', style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                      ),
+                      ...validRecent.map((v) {
                       final rating = _getRatingForK2sUrl(v.k2sUrl);
                       Color? bgColor;
                       if (rating != null && rating >= 1 && rating <= 5) {
@@ -2513,17 +3528,33 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
+                    ],
                     selectedItemBuilder: (context) {
-                      return validRecent.map((v) {
-                        return Align(
+                      return <Widget>[
+                        Align(
                           alignment: Alignment.centerLeft,
-                          child: Text(v.title, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                        );
-                      }).toList();
+                          child: Text('Empty', style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                        ),
+                        ...validRecent.map((v) {
+                          return Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(v.title, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                          );
+                        }),
+                      ];
                     },
                     onChanged: (value) {
-                      // Default: play the video (fallback if neither thumbnail nor title caught the tap)
+                      if (value == '__empty__') {
+                        _savePlayerPositions();
+                        _players[index].stop();
+                        setState(() {
+                          _playerK2sUrls[index] = null;
+                          _playerDownloadUrls[index] = null;
+                          _playerTotalFrames[index] = 0;
+                        });
+                        return;
+                      }
                       if (value != null) {
                         final video = _recentVideos.firstWhere((v) => v.k2sUrl == value);
                         setState(() {
@@ -2552,6 +3583,34 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                     visualDensity: VisualDensity.compact,
                   ),
                 ),
+                // Surprise: play random video from recents
+                IconButton(
+                  icon: const Icon(Icons.casino, size: 16),
+                  onPressed: validRecent.isNotEmpty ? () {
+                    setState(() { _selectedPlayer = index; });
+                    final random = DateTime.now().millisecondsSinceEpoch;
+                    final picked = validRecent[random % validRecent.length];
+                    _switchVideo(index, picked);
+                  } : null,
+                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'Random video',
+                ),
+                // Collection: show origin path in tree
+                IconButton(
+                  icon: const Icon(Icons.folder_open, size: 16),
+                  onPressed: currentK2sUrl != null ? () {
+                    final location = _findLinkLocation(currentK2sUrl);
+                    if (location == null) return;
+                    final (domain, path) = location;
+                    _treeKey.currentState?.navigateToLink(domain, path, currentK2sUrl);
+                    _clearPickScope();
+                    _currentPreviewK2sUrl = null;
+                  } : null,
+                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'Show in tree',
+                ),
                 // Rating buttons
                 if (currentK2sUrl != null) ...[
                   const SizedBox(width: 2),
@@ -2573,14 +3632,15 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                       },
                       onSecondaryTap: () {
                         // Right-click: rate the selected tree item (path or link)
-                        if (_selectedLink != null && _selectedPath != null && _selectedDomain != null) {
+                        final sel = _treeSelection;
+                        if (sel.link != null && sel.path != null && sel.domain != null) {
                           setState(() {
-                            _appData.setRating(_selectedDomain!, _selectedPath!, _selectedLink!, ri + 1);
+                            _appData.setRating(sel.domain!, sel.path!, sel.link!, ri + 1);
                           });
                           _saveData();
-                        } else if (_selectedPath != null && _selectedDomain != null) {
+                        } else if (sel.path != null && sel.domain != null) {
                           setState(() {
-                            _appData.setPathRating(_selectedDomain!, _selectedPath!, ri + 1);
+                            _appData.setPathRating(sel.domain!, sel.path!, ri + 1);
                           });
                           _saveData();
                         }
@@ -2675,12 +3735,49 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                   ),
                 ),
                 const SizedBox(width: 4),
-                IconButton(
-                  icon: const Icon(Icons.access_time, size: 18),
-                  onPressed: _showRecentsPage,
-                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                  padding: EdgeInsets.zero,
-                  tooltip: 'Recents',
+                GestureDetector(
+                  onTap: () {
+                    _players[index].playOrPause();
+                  },
+                  onSecondaryTap: () {
+                    _players[index].stop();
+                    setState(() {
+                      _playerK2sUrls[index] = null;
+                      _playerTotalFrames[index] = 0;
+                    });
+                  },
+                  child: Tooltip(
+                    message: 'Play/Pause — right-click: Stop & clear',
+                    child: Icon(
+                      _players[index].state.playing ? Icons.pause : Icons.play_arrow,
+                      size: 18,
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: currentK2sUrl != null ? () {
+                    final location = _findLinkLocation(currentK2sUrl);
+                    if (location != null) {
+                      final (domain, path) = location;
+                      final current = _appData.getVr(domain, path, currentK2sUrl);
+                      _appData.setVr(domain, path, currentK2sUrl, !current);
+                      _saveData();
+                      setState(() {});
+                    }
+                  } : null,
+                  child: Tooltip(
+                    message: 'VR 180°',
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: (currentK2sUrl != null && _getVrForK2sUrl(currentK2sUrl)) ? Colors.green[100] : null,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Icon(Icons.vrpano, size: 18,
+                        color: currentK2sUrl != null ? Colors.grey[700] : Colors.grey[400]),
+                    ),
+                  ),
                 ),
                 IconButton(
                   icon: const Icon(Icons.close, size: 18),
@@ -2699,27 +3796,33 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
             child: RepaintBoundary(
               child: Focus(
                 focusNode: _playerFocusNodes[index],
-                child: Video(
-                  controller: _videoControllers[index],
-                  controls: (state) => GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: () {
-                      setState(() { _selectedPlayer = index; });
-                      final pos = _players[index].state.position;
-                      _players[index].seek(pos + const Duration(seconds: 2));
-                    },
-                    onDoubleTap: () {
-                      setState(() { _selectedPlayer = index; });
-                      final pos = _players[index].state.position;
-                      _players[index].seek(pos + const Duration(seconds: 10));
-                    },
-                    onSecondaryTap: () {
-                      setState(() { _selectedPlayer = index; });
-                      final pos = _players[index].state.position;
-                      final target = pos - const Duration(seconds: 10);
-                      _players[index].seek(target < Duration.zero ? Duration.zero : target);
-                    },
-                    child: const SizedBox.expand(),
+                child: ClipRect(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: isVr ? 0.5 : 1.0,
+                    child: Video(
+                      controller: _videoControllers[index],
+                      controls: (state) => GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: () {
+                          setState(() { _selectedPlayer = index; });
+                          final pos = _players[index].state.position;
+                          _players[index].seek(pos + const Duration(seconds: 2));
+                        },
+                        onDoubleTap: () {
+                          setState(() { _selectedPlayer = index; });
+                          final pos = _players[index].state.position;
+                          _players[index].seek(pos + const Duration(seconds: 10));
+                        },
+                        onSecondaryTap: () {
+                          setState(() { _selectedPlayer = index; });
+                          final pos = _players[index].state.position;
+                          final target = pos - const Duration(seconds: 10);
+                          _players[index].seek(target < Duration.zero ? Duration.zero : target);
+                        },
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -2807,7 +3910,7 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                 }
                 final barWidth = constraints.maxWidth;
                 // Extract fileId for sprite hover
-                final fileId = _extractFileId(k2sUrl) ?? '';
+                final fileId = extractFileId(k2sUrl) ?? '';
                 return Stack(
                   children: tags.map((tag) {
                     final frame = tag['frame'] as int;
@@ -2818,11 +3921,11 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                     return Positioned(
                       left: pos.clamp(0, barWidth - 20),
                       top: 2,
-                      child: _SpriteHoverTag(
+                      child: SpriteHoverTag(
                         emoji: emoji,
                         frame: frame,
                         fileId: fileId,
-                        timeLabel: _formatTime(frame * 10),
+                        timeLabel: formatTime(frame * 10),
                         fontSize: 16,
                         onTap: () {
                           final seekMs = frame * 10 * 1000;
@@ -2858,7 +3961,8 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
     final positionSec = _players[playerIdx].state.position.inSeconds;
     final frame = positionSec ~/ 10;
 
-    final overlay = Overlay.of(context);
+    final overlay = globalOverlay;
+    if (overlay == null) return;
     late OverlayEntry entry;
     entry = OverlayEntry(
       builder: (ctx) {
@@ -2867,8 +3971,8 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
             // Transparent barrier to dismiss
             Positioned.fill(
               child: GestureDetector(
-                onTap: () => entry.remove(),
-                onSecondaryTap: () => entry.remove(),
+                onTap: () { if (entry.mounted) entry.remove(); },
+                onSecondaryTap: () { if (entry.mounted) entry.remove(); },
                 child: Container(color: Colors.transparent),
               ),
             ),
@@ -2895,7 +3999,7 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                         children: List.generate(kTagKeys.length, (i) {
                           return GestureDetector(
                             onTap: () {
-                              entry.remove();
+                              if (entry.mounted) entry.remove();
                               setState(() {
                                 if (_appData.getRating(domain, path, k2sUrl) == null) {
                                   _appData.setRating(domain, path, k2sUrl, 3);
@@ -2918,7 +4022,7 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
                         children: List.generate(5, (i) {
                           return GestureDetector(
                             onTap: () {
-                              entry.remove();
+                              if (entry.mounted) entry.remove();
                               setState(() {
                                 _appData.setRating(domain, path, k2sUrl, i + 1);
                               });
@@ -2949,8 +4053,9 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
 
     // Auto-dismiss after 3 seconds
     Future.delayed(const Duration(seconds: 3), () {
+      if (!mounted) return;
       if (entry.mounted) {
-        entry.remove();
+        try { entry.remove(); } catch (_) {}
       }
     });
   }
@@ -2991,17 +4096,22 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
   }
 
   void _showRecentsPage() {
+    if (kIsWeb) return;
+    final html = _buildRecentsHtml(forWebServer: false);
+    _browserController.loadHtmlString(html, baseUrl: 'https://static-cache.k2s.cc');
+  }
+
+  String _buildRecentsHtml({bool forWebServer = false}) {
     final validRecent = _recentVideos.where((v) => !v.isExpired && _getRatingForK2sUrl(v.k2sUrl) != 5).toList();
     // Sort by completion percentage (least complete first)
     validRecent.sort((a, b) => a.watchedPercent.compareTo(b.watchedPercent));
 
     if (validRecent.isEmpty) {
-      _browserController.loadHtmlString('''
+      return '''
 <!DOCTYPE html><html><head><meta charset="utf-8"></head>
 <body style="background:#222;color:#aaa;font:16px sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
 <p>No recent videos.</p>
-</body></html>''');
-      return;
+</body></html>''';
     }
 
     final ratingColorsCss = ['#f44336', '#ffc107', '#4caf50', '#2196f3', '#9e9e9e'];
@@ -3029,14 +4139,12 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
       }
 
       // Get file ID for preview image
-      final fileId = _extractFileId(video.k2sUrl) ?? '';
-      final previewImgUrl = fileId.isNotEmpty
-          ? 'https://static-cache.k2s.cc/sprite/$fileId/00.jpeg'
-          : '';
+      final fileId = extractFileId(video.k2sUrl) ?? '';
 
-      // Escape title for HTML
+      // Escape title and URLs for HTML
       final escapedTitle = video.title.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
       final escapedK2sUrl = video.k2sUrl.replaceAll("'", "\\'");
+      final escapedDownloadUrl = video.downloadUrl.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
 
       // Build horizontal strip of clipped sprite frames for tags + current position
       final stripHtml = StringBuffer();
@@ -3071,7 +4179,7 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
           final timeStr = '$mm:${ss.toString().padLeft(2, '0')}';
           final borderStyle = isCurrentPos ? 'border:2px solid #f44336;' : 'border:2px solid transparent;';
           stripHtml.write('''
-<div class="frame-cell" data-url="$escapedK2sUrl" data-frame="$frame" title="$timeStr" style="$borderStyle">
+<div class="frame-cell" data-url="$escapedK2sUrl" data-download-url="$escapedDownloadUrl" data-frame="$frame" title="$timeStr" style="$borderStyle">
   <div class="frame-clip" style="background-image:url('$spriteUrl');background-position:-${col * 120}px -${row * 90}px;background-size:600px 450px;"></div>
   ${emoji.isNotEmpty ? '<span class="frame-tag">$emoji</span>' : ''}
 </div>
@@ -3080,15 +4188,198 @@ document.querySelectorAll('#sprites img').forEach(function(img) {
       }
 
       final pct = video.watchedPercent;
-      cards.write('''
+      final cardIdx = validRecent.indexOf(video);
+      final isVr = location != null && _appData.getVr(location.$1, location.$2, video.k2sUrl);
+      if (forWebServer) {
+        // Rating dots
+        final ratingDots = StringBuffer();
+        for (int r = 1; r <= 5; r++) {
+          final active = rating == r;
+          final border = active ? 'border:2px solid #fff;' : 'border:2px solid transparent;';
+          ratingDots.write('<span class="rating-dot" data-card="$cardIdx" data-rating="$r" style="background:${ratingColorsCss[r - 1]};$border" title="Rate $r"></span>');
+        }
+        final vrClass = isVr ? ' active' : '';
+        cards.write('''
 <div class="card" style="background:$bgColor;border-color:$borderColor;">
-  <div class="title" data-url="$escapedK2sUrl" style="background:linear-gradient(to right, ${borderColor}66 ${pct}%, transparent ${pct}%);">$escapedTitle <span class="pct">${pct}%</span></div>
-  <div class="strip">$stripHtml</div>
+  <div class="title" data-url="$escapedK2sUrl" data-download-url="$escapedDownloadUrl" data-card="$cardIdx" style="background:linear-gradient(to right, ${borderColor}66 ${pct}%, transparent ${pct}%);">
+    <span class="remove-btn" data-card="$cardIdx" title="Remove from recents">&times;</span>
+    $escapedTitle <span class="pct">${pct}%</span>
+    <span class="card-actions">$ratingDots<span class="vr-btn$vrClass" data-card="$cardIdx" title="VR 180°">VR</span></span>
+  </div>
+  <div class="strip" data-card="$cardIdx">$stripHtml</div>
 </div>
 ''');
+      } else {
+        cards.write('''
+<div class="card" style="background:$bgColor;border-color:$borderColor;">
+  <div class="title" data-url="$escapedK2sUrl" data-download-url="$escapedDownloadUrl" data-card="$cardIdx" style="background:linear-gradient(to right, ${borderColor}66 ${pct}%, transparent ${pct}%);">$escapedTitle <span class="pct">${pct}%</span></div>
+  <div class="strip" data-card="$cardIdx">$stripHtml</div>
+</div>
+''');
+      }
     }
 
-    final html = '''
+    final scriptJs = forWebServer ? '''
+document.querySelectorAll('.title').forEach(function(el) {
+  el.addEventListener('click', function(e) {
+    if (e.target.classList.contains('remove-btn') || e.target.classList.contains('rating-dot') || e.target.classList.contains('vr-btn')) return;
+    var card = el.getAttribute('data-card');
+    window.location.href = '/deovr/' + card;
+  });
+});
+document.querySelectorAll('.remove-btn').forEach(function(btn) {
+  btn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    var card = btn.getAttribute('data-card');
+    fetch('/remove/' + card, {method:'POST'}).then(function() { location.reload(); });
+  });
+});
+document.querySelectorAll('.rating-dot').forEach(function(dot) {
+  dot.addEventListener('click', function(e) {
+    e.stopPropagation();
+    var card = dot.getAttribute('data-card');
+    var rating = dot.getAttribute('data-rating');
+    fetch('/rate/' + card + '/' + rating, {method:'POST'}).then(function() { location.reload(); });
+  });
+});
+document.querySelectorAll('.vr-btn').forEach(function(btn) {
+  btn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    var card = btn.getAttribute('data-card');
+    fetch('/vr/' + card, {method:'POST'}).then(function() { location.reload(); });
+  });
+});
+// Tree browser
+var treeDomain = document.getElementById('tree-domain');
+var treePath = document.getElementById('tree-path');
+var treeAdd = document.getElementById('tree-add');
+var treeNext = document.getElementById('tree-next');
+var treeEnd = document.getElementById('tree-end');
+var treeAddVr = document.getElementById('tree-add-vr');
+var treePreview = document.getElementById('tree-preview');
+var previewTitle = document.getElementById('preview-title');
+var previewStatus = document.getElementById('preview-status');
+var previewImages = document.getElementById('preview-images');
+var treeCount = document.getElementById('tree-count');
+var currentLink = null;
+fetch('/tree/domains').then(function(r){return r.json();}).then(function(domains) {
+  domains.forEach(function(d) {
+    var o = document.createElement('option'); o.value = d; o.textContent = d;
+    treeDomain.appendChild(o);
+  });
+});
+treeDomain.addEventListener('change', function() {
+  treePath.innerHTML = '<option value="">-- collection --</option>';
+  treePreview.style.display = 'none';
+  treeAdd.style.display = 'none';
+  treeNext.style.display = 'none';
+  treeEnd.style.display = 'none';
+  treeCount.textContent = '';
+  currentLink = null;
+  if (!treeDomain.value) { treePath.style.display = 'none'; return; }
+  fetch('/tree/paths/' + encodeURIComponent(treeDomain.value)).then(function(r){return r.json();}).then(function(paths) {
+    paths.forEach(function(p) {
+      var o = document.createElement('option'); o.value = p; o.textContent = p;
+      treePath.appendChild(o);
+    });
+    treePath.style.display = '';
+    treeEnd.style.display = '';
+  });
+});
+function loadPreview() {
+  if (!treeDomain.value || !treePath.value) return;
+  previewStatus.textContent = 'Loading...';
+  previewImages.style.display = 'none';
+  previewImages.innerHTML = '';
+  treeAdd.disabled = true;
+  treeAddVr.disabled = true;
+  fetch('/tree/preview/' + encodeURIComponent(treeDomain.value) + '/' + encodeURIComponent(treePath.value))
+    .then(function(r){return r.json();})
+    .then(function(data) {
+      if (data.empty) { previewTitle.textContent = 'No fresh links'; previewStatus.textContent = ''; return; }
+      currentLink = data.link;
+      var sizeStr = data.fileSize ? ' [' + data.fileSize + ']' : '';
+      previewTitle.textContent = data.title + sizeStr;
+      treeCount.textContent = data.totalFresh + ' fresh';
+      previewStatus.textContent = '';
+      treeAdd.disabled = false;
+      treeAddVr.disabled = false;
+      if (data.images && data.images.length > 0) {
+        previewImages.innerHTML = '';
+        data.images.forEach(function(url) {
+          var img = document.createElement('img');
+          img.style.cssText = 'height:180px;display:none;margin-right:4px;border-radius:4px;';
+          img.onload = function() {
+            if (img.naturalWidth > 200 && img.naturalHeight > 200) {
+              img.style.display = 'inline-block';
+            } else {
+              img.remove();
+            }
+          };
+          img.onerror = function() { img.remove(); };
+          img.src = url;
+          previewImages.appendChild(img);
+        });
+        previewImages.style.display = 'block';
+      } else {
+        previewImages.style.display = 'none';
+        previewStatus.textContent = 'No preview images';
+      }
+    });
+}
+treePath.addEventListener('change', function() {
+  if (!treePath.value) { treePreview.style.display = 'none'; treeAdd.style.display = 'none'; treeAddVr.style.display = 'none'; treeNext.style.display = 'none'; return; }
+  treePreview.style.display = 'block';
+  treeAdd.style.display = '';
+  treeAddVr.style.display = '';
+  treeNext.style.display = '';
+  loadPreview();
+});
+treeNext.addEventListener('click', function() { loadPreview(); });
+function doTreeAdd(vr) {
+  if (!currentLink) return;
+  treeAdd.disabled = true;
+  treeAddVr.disabled = true;
+  previewStatus.textContent = 'Adding...';
+  var url = '/tree/add/' + encodeURIComponent(treeDomain.value) + '/' + encodeURIComponent(treePath.value) + '?link=' + encodeURIComponent(currentLink);
+  if (vr) url += '&vr=1';
+  fetch(url, {method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(data) {
+      if (data.status === 'ok') { previewStatus.textContent = 'Added' + (vr ? ' (VR)' : '') + ': ' + data.title; }
+      else if (data.status === 'already') { previewStatus.textContent = 'Already in recents'; }
+      else { previewStatus.textContent = 'Error: ' + (data.message || 'unknown'); }
+    });
+}
+treeAdd.addEventListener('click', function() { doTreeAdd(false); });
+treeAddVr.addEventListener('click', function() { doTreeAdd(true); });
+treeEnd.addEventListener('click', function() {
+  treeDomain.value = '';
+  treePath.style.display = 'none';
+  treePath.innerHTML = '<option value="">-- collection --</option>';
+  treePreview.style.display = 'none';
+  treeAdd.style.display = 'none';
+  treeAddVr.style.display = 'none';
+  treeNext.style.display = 'none';
+  treeEnd.style.display = 'none';
+  treeCount.textContent = '';
+  currentLink = null;
+});''' : '''
+document.querySelectorAll('.title').forEach(function(el) {
+  el.addEventListener('click', function(e) {
+    var url = el.getAttribute('data-url');
+    FrameClick.postMessage('recents:play:' + url);
+  });
+});
+document.querySelectorAll('.frame-cell').forEach(function(cell) {
+  cell.addEventListener('click', function(e) {
+    var url = cell.getAttribute('data-url');
+    var frame = cell.getAttribute('data-frame');
+    FrameClick.postMessage('recents:tag:' + url + ':' + frame);
+  });
+});''';
+
+    return '''
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><style>
@@ -3102,29 +4393,503 @@ body { margin:0; padding:12px; background:#222; font-family:sans-serif; }
 .frame-cell:hover { opacity:0.8; }
 .frame-clip { width:100%; height:100%; background-repeat:no-repeat; }
 .frame-tag { position:absolute; top:2px; left:2px; font-size:16px; text-shadow:0 0 3px #000, 0 0 6px #000; }
+.remove-btn { cursor:pointer; color:#f44336; font-size:18px; font-weight:bold; margin-right:6px; }
+.remove-btn:hover { color:#ff6659; }
+.card-actions { float:right; display:inline-flex; align-items:center; gap:4px; }
+.rating-dot { display:inline-block; width:14px; height:14px; border-radius:3px; cursor:pointer; }
+.rating-dot:hover { opacity:0.7; }
+.vr-btn { display:inline-block; font-size:10px; font-weight:bold; color:#aaa; background:#444; padding:1px 4px; border-radius:3px; cursor:pointer; margin-left:4px; }
+.vr-btn.active { background:#4caf50; color:#fff; }
+.vr-btn:hover { opacity:0.7; }
+.deovr-link { display:inline-block; margin-bottom:12px; color:#4fc3f7; font-size:13px; text-decoration:none; }
+.deovr-link:hover { text-decoration:underline; }
+.tree-bar { background:#333; padding:8px 12px; margin-bottom:12px; border-radius:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.tree-bar select { background:#444; color:#fff; border:1px solid #666; border-radius:4px; padding:4px 8px; font-size:13px; }
+.tree-bar button { background:#555; color:#fff; border:none; border-radius:4px; padding:4px 12px; font-size:13px; cursor:pointer; }
+.tree-bar button:hover { background:#777; }
+.tree-bar button:disabled { opacity:0.4; cursor:default; }
+.tree-bar .count { color:#aaa; font-size:11px; }
+.tree-preview { background:#111; border:2px solid #555; border-radius:8px; margin-bottom:12px; padding:10px; display:none; }
+.tree-preview .preview-title { color:#fff; font-size:14px; font-weight:bold; margin-bottom:6px; }
+.tree-preview .preview-size { color:#aaa; font-size:12px; margin-left:8px; }
+.tree-preview img { max-width:100%; border-radius:4px; margin-top:6px; }
+.tree-preview .preview-status { color:#aaa; font-size:12px; margin-top:4px; }
 </style></head>
 <body>
+${forWebServer ? '<a class="deovr-link" href="/deovr">/deovr</a>' : ''}
+${forWebServer ? '''
+<div class="tree-bar" id="tree-bar">
+  <select id="tree-domain"><option value="">-- site --</option></select>
+  <select id="tree-path" style="display:none;"><option value="">-- collection --</option></select>
+  <span class="count" id="tree-count"></span>
+  <button id="tree-add" style="display:none;" disabled>Add</button>
+  <button id="tree-add-vr" style="display:none;" disabled>Add VR</button>
+  <button id="tree-next" style="display:none;">Next</button>
+  <button id="tree-end" style="display:none;">End</button>
+</div>
+<div class="tree-preview" id="tree-preview">
+  <div class="preview-title" id="preview-title"></div>
+  <div class="preview-status" id="preview-status"></div>
+  <div id="preview-images" style="display:none;overflow-x:auto;white-space:nowrap;padding:4px 0;"></div>
+</div>
+''' : ''}
 $cards
 <script>
-document.querySelectorAll('.title').forEach(function(el) {
-  el.addEventListener('click', function(e) {
-    var url = el.getAttribute('data-url');
-    FrameClick.postMessage('recents:play:' + url);
-  });
-});
-document.querySelectorAll('.frame-cell').forEach(function(cell) {
-  cell.addEventListener('click', function(e) {
-    var url = cell.getAttribute('data-url');
-    var frame = cell.getAttribute('data-frame');
-    FrameClick.postMessage('recents:tag:' + url + ':' + frame);
-  });
-});
+$scriptJs
 </script>
 </body>
 </html>
 ''';
+  }
 
-    _browserController.loadHtmlString(html, baseUrl: 'https://static-cache.k2s.cc');
+  Future<void> _toggleRecentsServer() async {
+    if (kIsWeb) return;
+    stderr.writeln('[server] toggle called, active=$_recentsServerActive');
+    if (_recentsServerActive) {
+      await _recentsServer?.close();
+      setState(() {
+        _recentsServer = null;
+        _recentsServerActive = false;
+      });
+      stderr.writeln('[server] stopped');
+    } else {
+      try {
+        final server = await HttpServer.bind(InternetAddress.anyIPv4, 9999);
+        setState(() {
+          _recentsServer = server;
+          _recentsServerActive = true;
+        });
+        stderr.writeln('[server] started on http://localhost:9999');
+        server.listen((request) async {
+          stderr.writeln('[server] ${request.method} ${request.uri.path}');
+          final path = request.uri.path;
+          if (path == '/deovr') {
+            _handleDeovrIndex(request);
+          } else if (path.startsWith('/deovr/')) {
+            _handleDeovrVideo(request);
+          } else if (path.startsWith('/remove/')) {
+            _handleRemoveRecent(request);
+          } else if (path.startsWith('/rate/')) {
+            _handleRateRecent(request);
+          } else if (path.startsWith('/vr/')) {
+            _handleVrToggle(request);
+          } else if (path == '/tree/domains') {
+            _handleTreeDomains(request);
+          } else if (path.startsWith('/tree/paths/')) {
+            _handleTreePaths(request);
+          } else if (path.startsWith('/tree/preview/')) {
+            await _handleTreePreview(request);
+          } else if (path.startsWith('/tree/add/')) {
+            await _handleTreeAdd(request);
+          } else {
+            final html = _buildRecentsHtml(forWebServer: true);
+            request.response
+              ..statusCode = HttpStatus.ok
+              ..headers.contentType = ContentType.html
+              ..write(html)
+              ..close();
+          }
+        });
+      } catch (e) {
+        stderr.writeln('[server] failed to start: $e');
+        _showFlash('Failed to start server: $e');
+      }
+    }
+  }
+
+  /// Build the DeoVR feed list: VR videos first, then non-VR, each group shuffled.
+  /// Caches the result per request cycle so index and video endpoints match.
+  List<RecentVideo> _deovrFeedOrder = [];
+  int _deovrFeedStamp = 0;
+
+  List<RecentVideo> _buildDeovrFeed() {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Rebuild every 60 seconds to keep the shuffle stable across index+video requests
+    if (_deovrFeedOrder.isEmpty || (now - _deovrFeedStamp) > 60) {
+      final validRecent = _recentVideos.where((v) => !v.isExpired && _getRatingForK2sUrl(v.k2sUrl) != 5).toList();
+      final vr = validRecent.where((v) => _getVrForK2sUrl(v.k2sUrl)).toList()..shuffle();
+      final nonVr = validRecent.where((v) => !_getVrForK2sUrl(v.k2sUrl)).toList()..shuffle();
+      _deovrFeedOrder = [...vr, ...nonVr];
+      _deovrFeedStamp = now;
+    }
+    return _deovrFeedOrder;
+  }
+
+  void _handleDeovrIndex(HttpRequest request) {
+    final validRecent = _buildDeovrFeed();
+
+    final hostHeader = request.headers.value('host') ?? 'localhost:9999';
+    final host = hostHeader.contains(':') ? hostHeader : '$hostHeader:9999';
+    final list = validRecent.asMap().entries.map((e) {
+      final i = e.key;
+      final v = e.value;
+      final fileId = extractFileId(v.k2sUrl) ?? '';
+      final thumbUrl = fileId.isNotEmpty
+          ? 'https://static-cache.k2s.cc/sprite/$fileId/00.jpeg'
+          : '';
+      return {
+        'title': v.title,
+        'videoLength': (v.durationSeconds).round(),
+        'thumbnailUrl': thumbUrl,
+        'video_url': 'http://$host/deovr/$i',
+      };
+    }).toList();
+
+    final body = json.encode({
+      'authorized': '1',
+      'scenes': [
+        {'name': 'Recents', 'list': list},
+      ],
+    });
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(body)
+      ..close();
+  }
+
+  void _handleDeovrVideo(HttpRequest request) {
+    final idxStr = request.uri.path.substring('/deovr/'.length);
+    final idx = int.tryParse(idxStr);
+    final validRecent = _buildDeovrFeed();
+
+    if (idx == null || idx < 0 || idx >= validRecent.length) {
+      request.response
+        ..statusCode = HttpStatus.notFound
+        ..write('Not found')
+        ..close();
+      return;
+    }
+
+    final v = validRecent[idx];
+    final fileId = extractFileId(v.k2sUrl) ?? '';
+    final thumbUrl = fileId.isNotEmpty
+        ? 'https://static-cache.k2s.cc/sprite/$fileId/00.jpeg'
+        : '';
+
+    // Build timestamps from tags
+    final location = _findLinkLocation(v.k2sUrl);
+    final timeStamps = <Map<String, dynamic>>[];
+    if (location != null) {
+      final (domain, path) = location;
+      final tags = _appData.getTags(domain, path, v.k2sUrl);
+      for (final tag in tags) {
+        final frame = tag['frame'] as int;
+        final tagKey = tag['tag'] as String;
+        final emojiIdx = kTagKeys.indexOf(tagKey);
+        final emoji = emojiIdx >= 0 ? kTagEmojis[emojiIdx] : tagKey;
+        timeStamps.add({'ts': frame * 10, 'name': '$emoji ${formatTime(frame * 10)}'});
+      }
+      timeStamps.sort((a, b) => (a['ts'] as int).compareTo(b['ts'] as int));
+    }
+
+    final isVr = location != null && _appData.getVr(location.$1, location.$2, v.k2sUrl);
+
+    final body = json.encode({
+      'id': idx,
+      'title': v.title,
+      'authorized': 1,
+      'videoLength': (v.durationSeconds).round(),
+      'thumbnailUrl': thumbUrl,
+      'is3d': isVr,
+      'screenType': isVr ? 'dome' : 'flat',
+      'stereoMode': isVr ? 'sbs' : 'off',
+      'encodings': [
+        {
+          'name': 'original',
+          'videoSources': [
+            {'resolution': 1080, 'url': v.downloadUrl},
+          ],
+        },
+      ],
+      'timeStamps': timeStamps,
+    });
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(body)
+      ..close();
+  }
+
+  void _handleRemoveRecent(HttpRequest request) {
+    final idxStr = request.uri.path.substring('/remove/'.length);
+    final idx = int.tryParse(idxStr);
+    final validRecent = _recentVideos.where((v) => !v.isExpired && _getRatingForK2sUrl(v.k2sUrl) != 5).toList();
+    validRecent.sort((a, b) => a.watchedPercent.compareTo(b.watchedPercent));
+
+    if (idx == null || idx < 0 || idx >= validRecent.length) {
+      request.response
+        ..statusCode = HttpStatus.notFound
+        ..write('Not found')
+        ..close();
+      return;
+    }
+
+    final v = validRecent[idx];
+    setState(() {
+      _recentVideos.removeWhere((r) => r.k2sUrl == v.k2sUrl);
+    });
+    _saveRecent();
+    stderr.writeln('[server] removed recent: ${v.title}');
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..write('OK')
+      ..close();
+  }
+
+  void _handleRateRecent(HttpRequest request) {
+    // /rate/<index>/<rating>
+    final parts = request.uri.path.substring('/rate/'.length).split('/');
+    if (parts.length != 2) {
+      request.response..statusCode = HttpStatus.badRequest..write('Bad request')..close();
+      return;
+    }
+    final idx = int.tryParse(parts[0]);
+    final rating = int.tryParse(parts[1]);
+    final validRecent = _recentVideos.where((v) => !v.isExpired && _getRatingForK2sUrl(v.k2sUrl) != 5).toList();
+    validRecent.sort((a, b) => a.watchedPercent.compareTo(b.watchedPercent));
+
+    if (idx == null || idx < 0 || idx >= validRecent.length || rating == null || rating < 1 || rating > 5) {
+      request.response..statusCode = HttpStatus.notFound..write('Not found')..close();
+      return;
+    }
+
+    final v = validRecent[idx];
+    final location = _findLinkLocation(v.k2sUrl);
+    if (location != null) {
+      final (domain, path) = location;
+      setState(() {
+        _appData.setRating(domain, path, v.k2sUrl, rating);
+      });
+      _saveData();
+      stderr.writeln('[server] rated ${v.title} as $rating');
+    }
+
+    request.response..statusCode = HttpStatus.ok..write('OK')..close();
+  }
+
+  void _handleVrToggle(HttpRequest request) {
+    // /vr/<index>
+    final idxStr = request.uri.path.substring('/vr/'.length);
+    final idx = int.tryParse(idxStr);
+    final validRecent = _recentVideos.where((v) => !v.isExpired && _getRatingForK2sUrl(v.k2sUrl) != 5).toList();
+    validRecent.sort((a, b) => a.watchedPercent.compareTo(b.watchedPercent));
+
+    if (idx == null || idx < 0 || idx >= validRecent.length) {
+      request.response..statusCode = HttpStatus.notFound..write('Not found')..close();
+      return;
+    }
+
+    final v = validRecent[idx];
+    final location = _findLinkLocation(v.k2sUrl);
+    if (location != null) {
+      final (domain, path) = location;
+      final current = _appData.getVr(domain, path, v.k2sUrl);
+      setState(() {
+        _appData.setVr(domain, path, v.k2sUrl, !current);
+      });
+      _saveData();
+      stderr.writeln('[server] toggled VR for ${v.title}: ${!current}');
+    }
+
+    request.response..statusCode = HttpStatus.ok..write('OK')..close();
+  }
+
+  void _handleTreeDomains(HttpRequest request) {
+    final classified = classifyLinks(_appData);
+    final freshDomains = classified['fresh']?.keys.toList() ?? [];
+    freshDomains.sort();
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(json.encode(freshDomains))
+      ..close();
+  }
+
+  void _handleTreePaths(HttpRequest request) {
+    final domain = Uri.decodeComponent(request.uri.path.substring('/tree/paths/'.length));
+    final classified = classifyLinks(_appData);
+    final allPaths = classified['fresh']?[domain]?.keys.toList() ?? [];
+    allPaths.sort(compareByTrailingNumber);
+    final groups = groupPathsByPrefix(allPaths);
+    // Return only top-level: group prefix or standalone path
+    final topLevel = groups.map((g) => g.prefix ?? g.paths.first).toList();
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(json.encode(topLevel))
+      ..close();
+  }
+
+  Future<void> _handleTreePreview(HttpRequest request) async {
+    // /tree/preview/<domain>/<path> — returns JSON with a random fresh link's preview info
+    // <path> may be a group prefix, so collect links from all matching sub-paths
+    final rest = request.uri.path.substring('/tree/preview/'.length);
+    final slashIdx = rest.indexOf('/');
+    if (slashIdx < 0) {
+      request.response..statusCode = HttpStatus.badRequest..write('Bad request')..close();
+      return;
+    }
+    final domain = Uri.decodeComponent(rest.substring(0, slashIdx));
+    final pathPrefix = Uri.decodeComponent(rest.substring(slashIdx + 1));
+
+    final classified = classifyLinks(_appData);
+    final domainPaths = classified['fresh']?[domain] ?? {};
+    // Collect links from the exact path and all sub-paths starting with the prefix
+    final allLinks = <(String, String)>[]; // (path, link)
+    for (final entry in domainPaths.entries) {
+      if (entry.key == pathPrefix || entry.key.startsWith(pathPrefix)) {
+        for (final link in entry.value) {
+          allLinks.add((entry.key, link));
+        }
+      }
+    }
+    if (allLinks.isEmpty) {
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType.json
+        ..write(json.encode({'empty': true}))
+        ..close();
+      return;
+    }
+
+    final pick = allLinks[(DateTime.now().microsecond) % allLinks.length];
+    final (path, link) = pick;
+    final fileId = extractFileId(link) ?? '';
+    final title = linkLabel(link);
+    final sourcePage = _appData.getSourcePage(domain, path, link);
+    final fileSize = _appData.getFileSize(domain, path, link);
+
+    // Collect preview images: sprites or source page images
+    final images = <String>[];
+    if (fileId.isNotEmpty) {
+      // Probe sprite images
+      final client = HttpClient();
+      for (int i = 0; ; i++) {
+        final idx = i.toString().padLeft(2, '0');
+        try {
+          final req = await client.headUrl(Uri.parse('https://static-cache.k2s.cc/sprite/$fileId/$idx.jpeg'));
+          final resp = await req.close();
+          await resp.drain();
+          if (resp.statusCode == 200) {
+            images.add('https://static-cache.k2s.cc/sprite/$fileId/$idx.jpeg');
+          } else {
+            break;
+          }
+        } catch (_) {
+          break;
+        }
+      }
+      client.close();
+    }
+    if (images.isEmpty && sourcePage != null) {
+      // Fetch source page and extract images
+      try {
+        final client = HttpClient();
+        final req = await client.getUrl(Uri.parse(sourcePage));
+        final resp = await req.close();
+        final body = await resp.transform(utf8.decoder).join();
+        client.close();
+        final imgPattern = RegExp(r'''(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|gif|webp)[^"']*)["']''', caseSensitive: false);
+        for (final match in imgPattern.allMatches(body)) {
+          var imgUrl = match.group(1)!;
+          if (imgUrl.startsWith('//')) imgUrl = 'https:$imgUrl';
+          else if (imgUrl.startsWith('/')) {
+            final uri = Uri.parse(sourcePage);
+            imgUrl = '${uri.scheme}://${uri.host}$imgUrl';
+          }
+          images.add(imgUrl);
+        }
+      } catch (_) {}
+    }
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(json.encode({
+        'link': link,
+        'fileId': fileId,
+        'title': title,
+        'images': images,
+        'fileSize': fileSize != null ? formatFileSize(fileSize) : null,
+        'totalFresh': allLinks.length,
+      }))
+      ..close();
+  }
+
+  Future<void> _handleTreeAdd(HttpRequest request) async {
+    // /tree/add/<domain>/<path>?link=<url>
+    final link = request.uri.queryParameters['link'];
+    if (link == null || link.isEmpty) {
+      request.response..statusCode = HttpStatus.badRequest..write('Missing link')..close();
+      return;
+    }
+
+    // Check if already in recents
+    if (_recentVideos.any((v) => v.k2sUrl == link)) {
+      request.response..statusCode = HttpStatus.ok..write(json.encode({'status': 'already'}))..close();
+      return;
+    }
+
+    final downloadUrl = await _getDownloadUrl(link);
+    if (downloadUrl == null) {
+      request.response..statusCode = HttpStatus.ok..write(json.encode({'status': 'error', 'message': 'Could not resolve download URL'}))..close();
+      return;
+    }
+
+    final title = _titleFromK2sUrl(link);
+    // Probe sprites to get totalFrames
+    int totalFrames = 0;
+    final fileId = extractFileId(link);
+    if (fileId != null) {
+      final client = HttpClient();
+      for (int i = 0; ; i++) {
+        final idx = i.toString().padLeft(2, '0');
+        try {
+          final req = await client.headUrl(Uri.parse('https://static-cache.k2s.cc/sprite/$fileId/$idx.jpeg'));
+          final resp = await req.close();
+          await resp.drain();
+          if (resp.statusCode == 200) {
+            totalFrames += 25;
+          } else {
+            break;
+          }
+        } catch (_) {
+          break;
+        }
+      }
+      client.close();
+    }
+
+    final recent = RecentVideo(
+      k2sUrl: link,
+      downloadUrl: downloadUrl,
+      title: title,
+      totalFrames: totalFrames,
+    );
+    setState(() { _recentVideos.add(recent); });
+    _saveRecent();
+
+    // Set VR if requested
+    final setVr = request.uri.queryParameters['vr'] == '1';
+    if (setVr) {
+      final location = _findLinkLocation(link);
+      if (location != null) {
+        final (domain, path) = location;
+        _appData.setVr(domain, path, link, true);
+        _saveData();
+      }
+    }
+    stderr.writeln('[server] added to recents${setVr ? ' (VR)' : ''}: $title');
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(json.encode({'status': 'ok', 'title': title}))
+      ..close();
   }
 
   // ============================================================
@@ -3147,7 +4912,7 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
               children: [
                 IconButton(
                   icon: const Icon(Icons.arrow_back, size: 18),
-                  onPressed: () async {
+                  onPressed: kIsWeb ? null : () async {
                     if (await _browserController.canGoBack()) {
                       _browserController.goBack();
                     }
@@ -3157,7 +4922,7 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
                 ),
                 IconButton(
                   icon: const Icon(Icons.arrow_forward, size: 18),
-                  onPressed: () async {
+                  onPressed: kIsWeb ? null : () async {
                     if (await _browserController.canGoForward()) {
                       _browserController.goForward();
                     }
@@ -3167,7 +4932,16 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
                 ),
                 IconButton(
                   icon: const Icon(Icons.refresh, size: 18),
-                  onPressed: () => _browserController.reload(),
+                  onPressed: kIsWeb ? null : () {
+                    _browserController.reload();
+                    setState(() {});
+                  },
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  padding: EdgeInsets.zero,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.home, size: 18),
+                  onPressed: () => _loadUrl('https://k2s.cc'),
                   constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                   padding: EdgeInsets.zero,
                 ),
@@ -3200,7 +4974,12 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
                 if (_currentPreviewK2sUrl != null)
                   Flexible(
                     child: Text(
-                      _linkLabel(_currentPreviewK2sUrl!),
+                      () {
+                        final loc = _findLinkLocation(_currentPreviewK2sUrl!);
+                        final sz = loc != null ? _appData.getFileSize(loc.$1, loc.$2, _currentPreviewK2sUrl!) : null;
+                        final prefix = sz != null ? '${formatFileSize(sz)} ' : '';
+                        return '$prefix${linkLabel(_currentPreviewK2sUrl!)}';
+                      }(),
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 11, color: Colors.black54),
                     ),
@@ -3211,6 +4990,21 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
                 for (int r = 1; r <= 5; r++)
                   GestureDetector(
                     onTap: _currentPreviewK2sUrl != null ? () => _onRatingClicked(r) : null,
+                    onSecondaryTap: () {
+                      // Right-click: rate the selected tree item (path or link)
+                      final sel = _treeSelection;
+                      if (sel.link != null && sel.path != null && sel.domain != null) {
+                        setState(() {
+                          _appData.setRating(sel.domain!, sel.path!, sel.link!, r);
+                        });
+                        _saveData();
+                      } else if (sel.path != null && sel.domain != null) {
+                        setState(() {
+                          _appData.setPathRating(sel.domain!, sel.path!, r);
+                        });
+                        _saveData();
+                      }
+                    },
                     child: Tooltip(
                       message: kRatingLabels[r - 1],
                       child: Container(
@@ -3238,11 +5032,23 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
                 const SizedBox(width: 2),
                 IconButton(
                   icon: Icon(Icons.play_arrow, size: 18,
-                    color: _playableK2sUrl != null ? Colors.green : Colors.grey[400]),
-                  onPressed: _playableK2sUrl != null ? _playK2sUrl : null,
+                    color: (_playableK2sUrl != null || _hasPlayableInfoVideo) ? Colors.green : Colors.grey[400]),
+                  onPressed: _playableK2sUrl != null
+                      ? _playK2sUrl
+                      : _hasPlayableInfoVideo
+                          ? _playCurrentInfoVideo
+                          : null,
                   constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                   padding: EdgeInsets.zero,
                   tooltip: 'Play',
+                ),
+                IconButton(
+                  icon: Icon(Icons.download, size: 18,
+                    color: _playableK2sUrl != null ? Colors.blue : Colors.grey[400]),
+                  onPressed: _playableK2sUrl != null ? _downloadK2sUrl : null,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'Download',
                 ),
                 IconButton(
                   icon: const Icon(Icons.casino, size: 18),
@@ -3251,12 +5057,40 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
                   padding: EdgeInsets.zero,
                   tooltip: 'Pick random link',
                 ),
+                Container(
+                  decoration: BoxDecoration(
+                    color: _recentsServerActive ? Colors.green[100] : null,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: IconButton(
+                    icon: Icon(_recentsServerActive ? Icons.stop : Icons.dns, size: 18),
+                    onPressed: _toggleRecentsServer,
+                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                    padding: EdgeInsets.zero,
+                    tooltip: _recentsServerActive ? 'Stop server (:9999)' : 'Start server (:9999)',
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.schedule, size: 18),
+                  onPressed: _showRecentsPage,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'Recents',
+                ),
               ],
             ),
           ),
-          // WebView
+          // WebView (desktop only)
           Expanded(
-            child: WebViewWidget(controller: _browserController),
+            child: kIsWeb
+                ? Container(
+                    color: Colors.grey[900],
+                    child: const Center(
+                      child: Text('Browser not available on web',
+                          style: TextStyle(color: Colors.white54)),
+                    ),
+                  )
+                : WebViewWidget(controller: _browserController),
           ),
         ],
       ),
@@ -3267,787 +5101,355 @@ document.querySelectorAll('.frame-cell').forEach(function(cell) {
   // Tree View Widget
   // ============================================================
   Widget _buildTreeView() {
-    return Container(
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.grey[300]!),
-      ),
-      child: Column(
-        children: [
-          // Tree content
-          Expanded(
-            child: _appData.domains.isEmpty
-                ? const Center(
-                    child: Text('No data. Use "Add" or "Extract" to populate.',
-                        style: TextStyle(color: Colors.grey)))
-                : ListView(
-                    padding: const EdgeInsets.all(4),
-                    children: _buildTreeNodes(),
-                  ),
-          ),
-          // Button bar
-          Container(
-            padding: const EdgeInsets.all(6.0),
-            decoration: BoxDecoration(
-              color: Colors.grey[200],
-              border: Border(top: BorderSide(color: Colors.grey[400]!)),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: _addCurrentSite,
-                  icon: const Icon(Icons.add, size: 16),
-                  label: const Text('Add', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _extractLinks,
-                  icon: const Icon(Icons.link, size: 16),
-                  label: const Text('Extract', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: (_selectedDomain != null) ? _removeSelected : null,
-                  icon: const Icon(Icons.delete, size: 16),
-                  label: const Text('Remove', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    backgroundColor: Colors.red[100],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _showRecentsPage,
-                  icon: const Icon(Icons.history, size: 16),
-                  label: const Text('Recents', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _playableK2sUrl != null ? _playK2sUrl : null,
-                  icon: const Icon(Icons.play_arrow, size: 16),
-                  label: const Text('Play', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _selectedLink != null ? () {
-                    _loadUrl(_selectedLink!);
-                  } : null,
-                  icon: const Icon(Icons.open_in_browser, size: 16),
-                  label: const Text('View', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _selectedDomain != null ? _unrateSelected : null,
-                  icon: const Icon(Icons.star_border, size: 16),
-                  label: const Text('Unrate', style: TextStyle(fontSize: 12)),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+    return TreeView(
+      key: _treeKey,
+      appData: _appData,
+      recentVideos: _recentVideos,
+      selectedPlayer: _selectedPlayer,
+      players: _players,
+      currentPreviewK2sUrl: _currentPreviewK2sUrl,
+      playableK2sUrl: _playableK2sUrl,
+      deepExtract: _deepExtract,
+      extractLooping: _extractLooping,
+      extractLoopPage: _extractLoopPage,
+      extractLimitController: _extractLimitController,
+      searchResults: _searchResults,
+      onLoadUrl: _loadUrl,
+      onPreviewLink: _previewLink,
+      onAddSite: _addCurrentSite,
+      onAddSiteWithDialog: _addCurrentSiteWithDialog,
+      onExtractLinks: _extractLinks,
+      onStartExtractLoop: _startExtractLoop,
+      onRemoveSelected: _removeSelected,
+      onRemoveBySubstring: _removeBySubstring,
+      onDedupSelected: _dedupSelected,
+      onVrSelected: _vrSelected,
+      onPlayK2sUrl: _playK2sUrl,
+      onDeepExtractChanged: (v) => setState(() { _deepExtract = v; }),
+      onSwitchVideo: _switchVideo,
+      onSaveData: _saveData,
+      onSaveRecent: _saveRecent,
+      onSaveSearches: _saveSearches,
+      onSelectionChanged: (sel) => setState(() {
+        _treeSelection = sel;
+        _pickScopeDomain = null;
+        _pickScopePath = null;
+        _pickScopeGroupPaths = null;
+      }),
+      onExtractLoopStop: () => setState(() { _extractLooping = false; }),
+      infoData: _infoData,
+      onInfoPreview: _showInfoPreview,
+      onInfoPlay: _playInfoVideo,
     );
   }
 
-  void _unrateSelected() {
-    if (_selectedDomain == null) return;
-    setState(() {
-      if (_selectedLink != null && _selectedPath != null) {
-        // Unrate single link
-        final info = _appData.data[_selectedDomain!]?[_selectedPath!]?[_selectedLink!];
-        if (info != null) info.remove('rating');
-      } else if (_selectedPath != null) {
-        // Unrate all links under the selected path
-        final pathData = _appData.data[_selectedDomain!]?[_selectedPath!];
-        if (pathData != null) {
-          for (final entry in pathData.entries) {
-            if (entry.key == '__meta__') continue;
-            if (entry.value is Map) (entry.value as Map).remove('rating');
-          }
-        }
-      } else {
-        // Unrate all links under the selected domain
-        final domainData = _appData.data[_selectedDomain!];
-        if (domainData != null) {
-          for (final pathEntry in domainData.values) {
-            if (pathEntry is Map) {
-              for (final entry in pathEntry.entries) {
-                if (entry.key == '__meta__') continue;
-                if (entry.value is Map) (entry.value as Map).remove('rating');
-              }
+  /// Get file names and sizes from K2S API for a list of file IDs.
+  Future<(Map<String, String>, Map<String, int>)> _getFileNames(List<String> fileIds) async {
+    final result = <String, String>{};
+    final sizes = <String, int>{};
+    if (kIsWeb || fileIds.isEmpty) return (result, sizes);
+    // Batch in chunks of 100 to avoid API limits
+    for (int i = 0; i < fileIds.length; i += 100) {
+      final batch = fileIds.sublist(i, (i + 100).clamp(0, fileIds.length));
+      stderr.writeln('[getFileNames] Batch ${i ~/ 100 + 1}: ${batch.length} IDs');
+      try {
+        final payload = <String, dynamic>{'ids': batch, 'extended_info': false};
+        final token = await _getK2sToken();
+        if (token != null) payload['auth_token'] = token;
+        final client = HttpClient();
+        final request = await client.postUrl(Uri.parse('$_k2sApiBase/getFilesInfo'));
+        request.headers.contentType = ContentType.json;
+        request.write(json.encode(payload));
+        final response = await request.close();
+        final body = await response.transform(const Utf8Decoder(allowMalformed: true)).join();
+        client.close();
+        final data = json.decode(body) as Map<String, dynamic>;
+        if (data['status'] == 'success') {
+          for (final f in (data['files'] as List<dynamic>? ?? [])) {
+            if (f is Map<String, dynamic>) {
+              final id = f['id'] as String?;
+              final name = f['name'] as String?;
+              if (id != null && name != null) result[id] = name;
+              final rawSize = f['size'];
+              final size = rawSize is int ? rawSize : rawSize is double ? rawSize.toInt() : rawSize is String ? int.tryParse(rawSize) : null;
+              if (id != null && size != null) sizes[id] = size;
             }
           }
+          stderr.writeln('[getFileNames] Batch got ${result.length} names so far');
+        } else {
+          stderr.writeln('[getFileNames] Batch failed: ${data['status']} ${data['message'] ?? ''}');
         }
+      } catch (e) {
+        stderr.writeln('[getFileNames] Batch error: $e');
+      }
+    }
+    return (result, sizes);
+  }
+
+  /// Toggle VR flag on all links below the selected node.
+  /// When the selected node is in a VR category, always clear VR.
+  void _vrSelected() {
+    final sel = _treeSelection;
+    if (sel.domain == null) return;
+    final domain = sel.domain!;
+    final links = <(String, String)>[]; // (path, link)
+    if (sel.link != null && sel.path != null) {
+      links.add((sel.path!, sel.link!));
+    } else if (sel.path != null) {
+      for (final link in _appData.linksFor(domain, sel.path!)) {
+        links.add((sel.path!, link));
+      }
+    } else if (sel.groupPaths != null) {
+      for (final path in sel.groupPaths!) {
+        for (final link in _appData.linksFor(domain, path)) {
+          links.add((path, link));
+        }
+      }
+    } else {
+      for (final path in _appData.pathsFor(domain)) {
+        for (final link in _appData.linksFor(domain, path)) {
+          links.add((path, link));
+        }
+      }
+    }
+    if (links.isEmpty) return;
+    // If selected node is in a VR category, always clear VR;
+    // otherwise use toggle logic (any not VR → set all VR, else clear all).
+    final newVr = sel.isVrCategory ? false : links.any((e) => !_appData.getVr(domain, e.$1, e.$2));
+    setState(() {
+      for (final (path, link) in links) {
+        _appData.setVr(domain, path, link, newVr);
       }
     });
     _saveData();
+    _showFlash('${newVr ? "Set" : "Cleared"} VR on ${links.length} links');
   }
 
-  /// Build a link node widget for the tree at the given nesting level.
-  Widget _buildLinkNode(String domain, String path, String link, int level) {
-    final isLinkSelected = _selectedDomain == domain &&
-        _selectedPath == path &&
-        _selectedLink == link;
-    final rating = _appData.getRating(domain, path, link);
-    Color? ratingColor;
-    if (rating != null && rating >= 1 && rating <= 5) {
-      ratingColor = kRatingColors[rating - 1];
-    }
+  /// Dedup: remove duplicate links by file ID in the selected subtree,
+  /// and rename bare URLs (without filename) using getFilesInfo.
+  Future<void> _dedupSelected() async {
+    final sel = _treeSelection;
+    if (kIsWeb || sel.domain == null) return;
+    final domain = sel.domain!;
 
-    // Build tag emoji widgets for this link
-    final linkTags = _appData.getTags(domain, path, link);
-    final linkTagWidgets = <Widget>[];
-    final linkFileId = _extractFileId(link) ?? '';
-    for (final tag in linkTags) {
-      final frame = tag['frame'] as int;
-      final tagKey = tag['tag'] as String;
-      final tagIdx = kTagKeys.indexOf(tagKey);
-      final emoji = tagIdx >= 0 ? kTagEmojis[tagIdx] : '?';
-      linkTagWidgets.add(
-        _SpriteHoverTag(
-          emoji: emoji,
-          frame: frame,
-          fileId: linkFileId,
-          timeLabel: _formatTime(frame * 10),
-          fontSize: 12,
-          onTap: () {
-            // Play in the currently selected player
-            final playerIdx = _selectedPlayer;
-            final video = _recentVideos.where((v) => v.k2sUrl == link).firstOrNull;
-            if (video != null) {
-              _switchVideo(playerIdx, video);
-              Future.delayed(const Duration(milliseconds: 800), () {
-                _players[playerIdx].seek(Duration(milliseconds: frame * 10 * 1000));
-              });
-            }
-            _previewLink(link);
-          },
-        ),
-      );
-    }
-
-    return _TreeNode(
-      level: level,
-      icon: Icons.link,
-      label: _linkLabel(link),
-      selected: isLinkSelected,
-      backgroundColor: ratingColor,
-      tagWidgets: linkTagWidgets.isNotEmpty ? linkTagWidgets : null,
-      onTap: () {
-        _clearPickScope();
-        setState(() {
-          _selectedDomain = domain;
-          _selectedPath = path;
-          _selectedLink = link;
-        });
-        _previewLink(link);
-      },
-      onSecondaryTap: () {
-        setState(() {
-          _appData.setHidden(domain, path, link, true);
-          _recentVideos.removeWhere((v) => v.k2sUrl == link);
-        });
-        _saveData();
-        _saveRecent();
-      },
-    );
-  }
-
-  /// Collect all visible links grouped by category.
-  /// Returns { category: { domain: { path: [link, ...] } } }
-  /// Categories: "fresh" (no rating, no tags), "rated" (has rating, no tags), "tagged" (has tags)
-  Map<String, Map<String, Map<String, List<String>>>> _classifyLinks() {
-    final result = <String, Map<String, Map<String, List<String>>>>{
-      'fresh': {},
-      'rated': {},
-      'tagged': {},
-    };
-    for (final domain in _appData.domains) {
-      final paths = _appData.pathsFor(domain);
-      if (paths.isEmpty) {
-        // Domain with no paths: show under Fresh
-        result['fresh']!.putIfAbsent(domain, () => {});
-        continue;
-      }
-      for (final path in paths) {
-        final visibleLinks = _appData.visibleLinksFor(domain, path);
-        if (visibleLinks.isEmpty) {
-          // Empty path: show under Fresh so it's visible in the tree
-          result['fresh']!.putIfAbsent(domain, () => {});
-          result['fresh']![domain]!.putIfAbsent(path, () => []);
-          continue;
-        }
-        for (final link in visibleLinks) {
-          final tags = _appData.getTags(domain, path, link);
-          final rating = _appData.getRating(domain, path, link);
-          String category;
-          if (tags.isNotEmpty) {
-            category = 'tagged';
-          } else if (rating != null && rating >= 1 && rating <= 4) {
-            category = 'rated';
-          } else {
-            category = 'fresh';
-          }
-          result[category]!.putIfAbsent(domain, () => {});
-          result[category]![domain]!.putIfAbsent(path, () => []);
-          result[category]![domain]![path]!.add(link);
-        }
+    final log = <String>[];
+    int _logCounter = 0;
+    void addLog(String msg, {bool flush = false}) {
+      log.add(msg);
+      stderr.writeln('[dedup] $msg');
+      _logCounter++;
+      if (flush || _logCounter % 50 == 0) {
+        _showLogPage(log);
       }
     }
-    return result;
-  }
 
-  /// Count total links in a category map.
-  int _countLinks(Map<String, Map<String, List<String>>> catMap) {
-    int count = 0;
-    for (final paths in catMap.values) {
-      for (final links in paths.values) {
-        count += links.length;
+    addLog('Dedup: $domain${sel.path != null ? ' / ${sel.path}' : ''}');
+
+    // Collect all (path, link) pairs in the subtree
+    final pathLinks = <(String, String)>[];
+    if (sel.link != null && sel.path != null) {
+      pathLinks.add((sel.path!, sel.link!));
+    } else if (sel.path != null) {
+      for (final link in _appData.linksFor(domain, sel.path!)) {
+        pathLinks.add((sel.path!, link));
       }
-    }
-    return count;
-  }
-
-  /// Build domain > path > link nodes for a given set of links at a base indentation level.
-  void _buildDomainPathLinks(List<Widget> nodes, String categoryKey, Map<String, Map<String, List<String>>> catMap, int baseLevel) {
-    final sortedDomains = catMap.keys.toList()..sort();
-    for (final domain in sortedDomains) {
-      final paths = catMap[domain]!;
-      final domainKey = '$categoryKey\t$domain';
-      final isDomainExpanded = _expandedDomains.contains(domainKey);
-      final isDomainSelected = _selectedDomain == domain && _selectedPath == null && _selectedLink == null;
-
-      final isDomainPickScope = _pickScopeDomain != null
-          ? (_pickScopeDomain == domain && _pickScopePath == null)
-          : (_selectedDomain == domain && _selectedPath == null);
-      nodes.add(
-        _TreeNode(
-          level: baseLevel,
-          icon: Icons.language,
-          label: '${_domainLabel(domain)} (${paths.values.fold<int>(0, (sum, l) => sum + l.length)})',
-          selected: isDomainSelected,
-          pickScope: isDomainPickScope,
-          expanded: isDomainExpanded,
-          onToggle: () {
-            setState(() {
-              if (isDomainExpanded) _expandedDomains.remove(domainKey);
-              else _expandedDomains.add(domainKey);
-            });
-          },
-          onTap: () {
-            _clearPickScope();
-            setState(() {
-              _selectedDomain = domain;
-              _selectedPath = null;
-              _selectedLink = null;
-            });
-            _loadUrl(_domainBaseUrl(domain));
-          },
-        ),
-      );
-
-      if (!isDomainExpanded) continue;
-
-      final sortedPaths = paths.keys.toList()..sort((a, b) {
-        final ra = _appData.getPathRating(domain, a);
-        final rb = _appData.getPathRating(domain, b);
-        if (ra != null && rb != null) {
-          final cmp = ra.compareTo(rb);
-          if (cmp != 0) return cmp;
-          return a.compareTo(b);
-        }
-        if (ra != null) return -1;
-        if (rb != null) return 1;
-        return a.compareTo(b);
-      });
-      for (final path in sortedPaths) {
-        final links = paths[path]!;
-        final pathKey = '$domain\t$path';
-        final isPathExpanded = _expandedPaths.contains(pathKey);
-        final isPathSelected = _selectedDomain == domain && _selectedPath == path && _selectedLink == null;
-        final isPathPickScope = _pickScopeDomain != null
-            ? (_pickScopeDomain == domain && _pickScopePath == path)
-            : (_selectedDomain == domain && _selectedPath == path);
-        final pathRating = _appData.getPathRating(domain, path);
-        Color? pathBgColor;
-        if (pathRating != null && pathRating >= 1 && pathRating <= 5) {
-          pathBgColor = kRatingColors[pathRating - 1];
-        }
-
-        nodes.add(
-          _TreeNode(
-            level: baseLevel + 1,
-            icon: Icons.folder,
-            label: '$path (${links.length})',
-            selected: isPathSelected,
-            pickScope: isPathPickScope,
-            backgroundColor: pathBgColor,
-            expanded: isPathExpanded,
-            onToggle: () {
-              setState(() {
-                if (isPathExpanded) _expandedPaths.remove(pathKey);
-                else _expandedPaths.add(pathKey);
-              });
-            },
-            onTap: () {
-              _clearPickScope();
-              setState(() {
-                _selectedDomain = domain;
-                _selectedPath = path;
-                _selectedLink = null;
-              });
-              _loadUrl('${_domainBaseUrl(domain)}$path');
-            },
-          ),
-        );
-
-        if (!isPathExpanded) continue;
-
-        final sortedLinks = links.toList()..sort();
-        for (final link in sortedLinks) {
-          nodes.add(_buildLinkNode(domain, path, link, baseLevel + 2));
-        }
-      }
-    }
-  }
-
-  List<Widget> _buildTreeNodes() {
-    final classified = _classifyLinks();
-    final nodes = <Widget>[];
-
-    // Fresh: no rating, no tags
-    final freshMap = classified['fresh']!;
-    final freshCount = _countLinks(freshMap);
-    final isFreshExpanded = _expandedCategories.contains('fresh');
-    nodes.add(
-      _TreeNode(
-        level: 0,
-        icon: Icons.fiber_new,
-        label: 'Fresh ($freshCount)',
-        selected: false,
-        expanded: isFreshExpanded,
-        onToggle: () {
-          setState(() {
-            if (isFreshExpanded) _expandedCategories.remove('fresh');
-            else _expandedCategories.add('fresh');
-          });
-        },
-        onTap: () {
-          setState(() {
-            if (isFreshExpanded) _expandedCategories.remove('fresh');
-            else _expandedCategories.add('fresh');
-          });
-        },
-      ),
-    );
-    if (isFreshExpanded) {
-      _buildDomainPathLinks(nodes, 'fresh', freshMap, 1);
-    }
-
-    // Rated: has rating but no tags
-    final ratedMap = classified['rated']!;
-    final ratedCount = _countLinks(ratedMap);
-    final isRatedExpanded = _expandedCategories.contains('rated');
-    nodes.add(
-      _TreeNode(
-        level: 0,
-        icon: Icons.star,
-        label: 'Rated ($ratedCount)',
-        selected: false,
-        expanded: isRatedExpanded,
-        onToggle: () {
-          setState(() {
-            if (isRatedExpanded) _expandedCategories.remove('rated');
-            else _expandedCategories.add('rated');
-          });
-        },
-        onTap: () {
-          setState(() {
-            if (isRatedExpanded) _expandedCategories.remove('rated');
-            else _expandedCategories.add('rated');
-          });
-        },
-      ),
-    );
-    if (isRatedExpanded) {
-      // Sub-group by rating (1=Super, 2=Top, 3=Ok, 4=Uhm)
-      for (int r = 1; r <= 4; r++) {
-        // Filter ratedMap to only links with this rating
-        final ratingMap = <String, Map<String, List<String>>>{};
-        for (final domain in ratedMap.keys) {
-          for (final path in ratedMap[domain]!.keys) {
-            final links = ratedMap[domain]![path]!.where((l) => _appData.getRating(domain, path, l) == r).toList();
-            if (links.isNotEmpty) {
-              ratingMap.putIfAbsent(domain, () => {});
-              ratingMap[domain]![path] = links;
-            }
-          }
-        }
-        if (ratingMap.isEmpty) continue;
-        final ratingCount = _countLinks(ratingMap);
-        final ratingKey = 'rated\t$r';
-        final isRatingExpanded = _expandedCategoryRatings.contains(ratingKey);
-        nodes.add(
-          _TreeNode(
-            level: 1,
-            icon: Icons.circle,
-            label: '${kRatingLabels[r - 1]} ($ratingCount)',
-            selected: false,
-            backgroundColor: kRatingColors[r - 1],
-            expanded: isRatingExpanded,
-            onToggle: () {
-              setState(() {
-                if (isRatingExpanded) _expandedCategoryRatings.remove(ratingKey);
-                else _expandedCategoryRatings.add(ratingKey);
-              });
-            },
-            onTap: () {
-              setState(() {
-                if (isRatingExpanded) _expandedCategoryRatings.remove(ratingKey);
-                else _expandedCategoryRatings.add(ratingKey);
-              });
-            },
-          ),
-        );
-        if (isRatingExpanded) {
-          _buildDomainPathLinks(nodes, ratingKey, ratingMap, 2);
+    } else {
+      for (final path in _appData.pathsFor(domain)) {
+        for (final link in _appData.linksFor(domain, path)) {
+          pathLinks.add((path, link));
         }
       }
     }
 
-    // Tagged: has at least one tag
-    final taggedMap = classified['tagged']!;
-    final taggedCount = _countLinks(taggedMap);
-    final isTaggedExpanded = _expandedCategories.contains('tagged');
-    nodes.add(
-      _TreeNode(
-        level: 0,
-        icon: Icons.label,
-        label: 'Tagged ($taggedCount)',
-        selected: false,
-        expanded: isTaggedExpanded,
-        onToggle: () {
-          setState(() {
-            if (isTaggedExpanded) _expandedCategories.remove('tagged');
-            else _expandedCategories.add('tagged');
-          });
-        },
-        onTap: () {
-          setState(() {
-            if (isTaggedExpanded) _expandedCategories.remove('tagged');
-            else _expandedCategories.add('tagged');
-          });
-        },
-      ),
-    );
-    if (isTaggedExpanded) {
-      // Sub-group by rating (1=Super, 2=Top, 3=Ok, 4=Uhm), then unrated
-      for (int r = 1; r <= 4; r++) {
-        final ratingMap = <String, Map<String, List<String>>>{};
-        for (final domain in taggedMap.keys) {
-          for (final path in taggedMap[domain]!.keys) {
-            final links = taggedMap[domain]![path]!.where((l) => _appData.getRating(domain, path, l) == r).toList();
-            if (links.isNotEmpty) {
-              ratingMap.putIfAbsent(domain, () => {});
-              ratingMap[domain]![path] = links;
-            }
-          }
+    addLog('${pathLinks.length} links to check');
+
+    // Group by file ID, track first occurrence
+    final seenIds = <String, (String, String)>{}; // id -> (path, link) of first occurrence
+    final duplicates = <(String, String, String)>[]; // (path, link, id) to remove
+    final needsRename = <(String, String, String)>[]; // (path, link, id) with no name or hex-ID name
+    final hexIdPattern = RegExp(r'^[0-9a-fA-F]{13,}$');
+
+    for (final (path, link) in pathLinks) {
+      final id = extractFileId(link);
+      if (id == null) continue;
+      if (seenIds.containsKey(id)) {
+        duplicates.add((path, link, id));
+      } else {
+        seenIds[id] = (path, link);
+        // Check if name is missing/hex-ID or size is missing
+        final name = _k2sLinkName(link);
+        final hasSize = _appData.getFileSize(domain, path, link) != null;
+        if (name.isEmpty || hexIdPattern.hasMatch(name) || !hasSize) {
+          needsRename.add((path, link, id));
         }
-        if (ratingMap.isEmpty) continue;
-        final ratingCount = _countLinks(ratingMap);
-        final ratingKey = 'tagged\t$r';
-        final isRatingExpanded = _expandedCategoryRatings.contains(ratingKey);
-        nodes.add(
-          _TreeNode(
-            level: 1,
-            icon: Icons.circle,
-            label: '${kRatingLabels[r - 1]} ($ratingCount)',
-            selected: false,
-            backgroundColor: kRatingColors[r - 1],
-            expanded: isRatingExpanded,
-            onToggle: () {
-              setState(() {
-                if (isRatingExpanded) _expandedCategoryRatings.remove(ratingKey);
-                else _expandedCategoryRatings.add(ratingKey);
-              });
-            },
-            onTap: () {
-              setState(() {
-                if (isRatingExpanded) _expandedCategoryRatings.remove(ratingKey);
-                else _expandedCategoryRatings.add(ratingKey);
-              });
-            },
-          ),
-        );
-        if (isRatingExpanded) {
-          _buildDomainPathLinks(nodes, ratingKey, ratingMap, 2);
-        }
-      }
-      // Unrated tagged links
-      final unratedMap = <String, Map<String, List<String>>>{};
-      for (final domain in taggedMap.keys) {
-        for (final path in taggedMap[domain]!.keys) {
-          final links = taggedMap[domain]![path]!.where((l) => _appData.getRating(domain, path, l) == null).toList();
-          if (links.isNotEmpty) {
-            unratedMap.putIfAbsent(domain, () => {});
-            unratedMap[domain]![path] = links;
-          }
-        }
-      }
-      if (unratedMap.isNotEmpty) {
-        _buildDomainPathLinks(nodes, 'tagged\tunrated', unratedMap, 1);
       }
     }
 
-    return nodes;
-  }
-}
+    addLog('${seenIds.length} unique IDs, ${duplicates.length} duplicates, ${needsRename.length} to rename', flush: true);
 
-// ============================================================
-// Global registry to close all sprite hover overlays
-// ============================================================
-final Set<OverlayEntry> _activeSpriteOverlays = {};
-
-void _closeAllSpriteHovers() {
-  for (final entry in _activeSpriteOverlays.toList()) {
-    if (entry.mounted) entry.remove();
-  }
-  _activeSpriteOverlays.clear();
-}
-
-// ============================================================
-// Sprite Hover Tag Widget - shows clipped sprite frame on hover
-// ============================================================
-class _SpriteHoverTag extends StatefulWidget {
-  final String emoji;
-  final int frame;
-  final String fileId;
-  final String timeLabel;
-  final double fontSize;
-  final VoidCallback? onTap;
-  final VoidCallback? onSecondaryTap;
-
-  const _SpriteHoverTag({
-    required this.emoji,
-    required this.frame,
-    required this.fileId,
-    required this.timeLabel,
-    this.fontSize = 16,
-    this.onTap,
-    this.onSecondaryTap,
-  });
-
-  @override
-  State<_SpriteHoverTag> createState() => _SpriteHoverTagState();
-}
-
-class _SpriteHoverTagState extends State<_SpriteHoverTag> {
-  OverlayEntry? _overlayEntry;
-  Timer? _autoCloseTimer;
-  bool _disposed = false;
-
-  void _showSpriteOverlay(Offset globalPosition) {
-    _closeAllSpriteHovers();
-    if (_disposed || !mounted) return;
-    if (widget.fileId.isEmpty) return;
-
-    final spriteIndex = widget.frame ~/ 25;
-    final row = (widget.frame % 25) ~/ 5;
-    final col = widget.frame % 5;
-    final spriteUrl = 'https://static-cache.k2s.cc/sprite/${widget.fileId}/${spriteIndex.toString().padLeft(2, '0')}.jpeg';
-
-    const cellDisplaySize = 160.0;
-    const spriteSize = cellDisplaySize * 5;
-
-    final entry = OverlayEntry(
-      builder: (ctx) {
-        return Positioned(
-          left: globalPosition.dx + 16,
-          top: globalPosition.dy - cellDisplaySize - 10,
-          child: IgnorePointer(
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(4),
-              child: Container(
-                width: cellDisplaySize,
-                height: cellDisplaySize,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.white, width: 2),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                clipBehavior: Clip.hardEdge,
-                child: OverflowBox(
-                  maxWidth: spriteSize,
-                  maxHeight: spriteSize,
-                  alignment: Alignment.topLeft,
-                  child: Transform.translate(
-                    offset: Offset(-col * cellDisplaySize, -row * cellDisplaySize),
-                    child: Image.network(
-                      spriteUrl,
-                      width: spriteSize,
-                      height: spriteSize,
-                      fit: BoxFit.fill,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-    _overlayEntry = entry;
-    _activeSpriteOverlays.add(entry);
-    Overlay.of(context).insert(entry);
-
-    // Auto-close after 2 seconds
-    _autoCloseTimer?.cancel();
-    _autoCloseTimer = Timer(const Duration(seconds: 2), () {
-      _removeSpriteOverlay();
+    // Remove duplicates, merging info into the keeper
+    int removed = 0;
+    setState(() {
+      for (final (path, link, id) in duplicates) {
+        final (keeperPath, keeperLink) = seenIds[id]!;
+        if (keeperPath == path) {
+          _mergeLinkInfo(domain, path, link, keeperLink);
+        }
+        _appData.removeLink(domain, path, link);
+        _recentVideos.removeWhere((v) => v.k2sUrl == link);
+        removed++;
+      }
     });
-  }
+    if (removed > 0) addLog('Removed $removed duplicates', flush: true);
 
-  void _removeSpriteOverlay() {
-    _autoCloseTimer?.cancel();
-    _autoCloseTimer = null;
-    final entry = _overlayEntry;
-    _overlayEntry = null;
-    if (entry != null) {
-      _activeSpriteOverlays.remove(entry);
-      if (entry.mounted) entry.remove();
+    // Rename bare URLs and hex-ID names by fetching real file names
+    int renamed = 0;
+    if (needsRename.isNotEmpty) {
+      for (final (path, link, id) in needsRename) {
+        final n = _k2sLinkName(link);
+        addLog('  needs rename: $id ${n.isEmpty ? "(bare)" : n}');
+      }
+      addLog('Fetching names for ${needsRename.length} links...', flush: true);
+      final ids = needsRename.map((e) => e.$3).toList();
+      final (names, fileSizes) = await _getFileNames(ids);
+      addLog('Got ${names.length} names from API', flush: true);
+      setState(() {
+        for (final (path, link, id) in needsRename) {
+          final name = names[id];
+          final oldName = _k2sLinkName(link);
+          if (name != null && name.isNotEmpty && name != oldName) {
+            final newUrl = 'https://k2s.cc/file/$id/$name';
+            addLog('  ${oldName.isEmpty ? "(bare)" : oldName} -> $name');
+            _appData.addLink(domain, path, newUrl);
+            _mergeLinkInfo(domain, path, link, newUrl);
+            _appData.removeLink(domain, path, link);
+            _recentVideos.removeWhere((v) => v.k2sUrl == link);
+            if (fileSizes.containsKey(id)) {
+              _appData.setFileSize(domain, path, newUrl, fileSizes[id]!);
+            }
+            renamed++;
+          } else if (name == null || name.isEmpty) {
+            addLog('  $id: no name returned');
+          } else {
+            // Name unchanged, but still store size if available
+            if (fileSizes.containsKey(id)) {
+              _appData.setFileSize(domain, path, link, fileSizes[id]!);
+            }
+          }
+        }
+      });
+      if (renamed > 0) addLog('Renamed $renamed links', flush: true);
+    }
+
+    // Clean multiple dots in names: keep only the last dot (before extension)
+    int dotsCleaned = 0;
+    setState(() {
+      for (final (path, link) in pathLinks) {
+        if (!_appData.data[domain]!.containsKey(path)) continue;
+        if (!_appData.data[domain]![path]!.containsKey(link)) continue;
+        final id = extractFileId(link);
+        if (id == null) continue;
+        final name = _k2sLinkName(link);
+        if (name.isEmpty) continue;
+        final dotCount = '.'.allMatches(name).length;
+        if (dotCount <= 1) continue;
+        final lastDot = name.lastIndexOf('.');
+        final base = name.substring(0, lastDot).replaceAll('.', '');
+        final ext = name.substring(lastDot);
+        final cleanName = '$base$ext';
+        final newUrl = 'https://k2s.cc/file/$id/$cleanName';
+        if (newUrl != link) {
+          addLog('  dots: $name -> $cleanName');
+          _appData.addLink(domain, path, newUrl);
+          _mergeLinkInfo(domain, path, link, newUrl);
+          _appData.removeLink(domain, path, link);
+          _recentVideos.removeWhere((v) => v.k2sUrl == link);
+          dotsCleaned++;
+        }
+      }
+    });
+    if (dotsCleaned > 0) addLog('Cleaned dots in $dotsCleaned links', flush: true);
+
+    // Normalize paths: merge paths with trailing slash into their normalized form
+    int normalizedPaths = 0;
+    setState(() {
+      for (final path in List<String>.from(_appData.pathsFor(domain))) {
+        final normalized = AppData.normalizePath(path);
+        if (normalized != path) {
+          addLog('  path: $path -> $normalized');
+          // Move all links from old path to normalized path
+          _appData.data[domain]!.putIfAbsent(normalized, () => {});
+          final links = Map<String, dynamic>.from(_appData.data[domain]![path] ?? {});
+          for (final entry in links.entries) {
+            _appData.data[domain]![normalized]!.putIfAbsent(entry.key, () => entry.value);
+          }
+          _appData.data[domain]!.remove(path);
+          // Selection will be refreshed via tree rebuild
+          normalizedPaths++;
+        }
+      }
+    });
+    if (normalizedPaths > 0) addLog('Normalized $normalizedPaths paths', flush: true);
+
+    // Remove empty paths and domains
+    int removedPaths = 0;
+    int removedDomains = 0;
+    setState(() {
+      for (final path in List<String>.from(_appData.pathsFor(domain))) {
+        if (_appData.linksFor(domain, path).isEmpty) {
+          _appData.removePath(domain, path);
+          removedPaths++;
+        }
+      }
+      if (_appData.pathsFor(domain).isEmpty) {
+        _appData.removeDomain(domain);
+        removedDomains++;
+      }
+    });
+    if (removedPaths > 0) addLog('Removed $removedPaths empty paths');
+    if (removedDomains > 0) addLog('Removed empty domain: $domain');
+
+    _saveData();
+    final parts = <String>[];
+    if (removed > 0) parts.add('$removed removed');
+    if (renamed > 0) parts.add('$renamed renamed');
+    if (dotsCleaned > 0) parts.add('$dotsCleaned dots cleaned');
+    if (normalizedPaths > 0) parts.add('$normalizedPaths paths normalized');
+    if (removedPaths > 0) parts.add('$removedPaths empty paths');
+    final summary = parts.isEmpty ? 'No changes' : parts.join(', ');
+    addLog('');
+    addLog('Done: $summary', flush: true);
+
+    // List all remaining link names
+    final remainingLinks = <String>[];
+    if (sel.path != null && _appData.data[domain] != null) {
+      remainingLinks.addAll(_appData.linksFor(domain, sel.path!));
+    } else if (_appData.data[domain] != null) {
+      for (final path in _appData.pathsFor(domain)) {
+        remainingLinks.addAll(_appData.linksFor(domain, path));
+      }
+    }
+    if (remainingLinks.isNotEmpty) {
+      addLog('');
+      addLog('${remainingLinks.length} links:');
+      final names = <String>[];
+      for (final link in remainingLinks) {
+        final name = _k2sLinkName(link);
+        addLog('  $name');
+        names.add(name);
+      }
+      // Save to dedup.txt
+      try {
+        final dataPath = await _getDataFilePath();
+        final dedupPath = '${File(dataPath).parent.path}/dedup.txt';
+        await File(dedupPath).writeAsString(names.join('\n'));
+        addLog('');
+        addLog('Saved to $dedupPath');
+      } catch (e) {
+        addLog('Error saving dedup.txt: $e');
+      }
     }
   }
 
-  @override
-  void dispose() {
-    _disposed = true;
-    _removeSpriteOverlay();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: widget.onTap,
-      onSecondaryTap: widget.onSecondaryTap,
-      child: MouseRegion(
-        onEnter: (event) => _showSpriteOverlay(event.position),
-        child: Tooltip(
-          message: widget.timeLabel,
-          child: Text(widget.emoji, style: TextStyle(fontSize: widget.fontSize)),
-        ),
-      ),
-    );
-  }
 }
 
-// ============================================================
-// Sprite Animated Hover Widget - TV icon that cycles through all frames
-// ============================================================
-// Tree Node Widget
-// ============================================================
-class _TreeNode extends StatelessWidget {
-  final int level;
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final bool? expanded; // null = no children (no toggle shown)
-  final VoidCallback onTap;
-  final VoidCallback? onToggle;
-  final VoidCallback? onSecondaryTap;
-  final Color? backgroundColor;
-  final List<Widget>? tagWidgets;
-  final bool pickScope;
-
-  const _TreeNode({
-    required this.level,
-    required this.icon,
-    required this.label,
-    required this.selected,
-    required this.onTap,
-    this.expanded,
-    this.onToggle,
-    this.onSecondaryTap,
-    this.backgroundColor,
-    this.tagWidgets,
-    this.pickScope = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      onSecondaryTap: onSecondaryTap,
-      child: Container(
-        padding: EdgeInsets.only(left: 16.0 * level + 4, top: 3, bottom: 3, right: 4),
-        decoration: BoxDecoration(
-          color: selected
-              ? Colors.deepPurple.withOpacity(0.15)
-              : backgroundColor?.withOpacity(0.2),
-          border: pickScope ? Border.all(color: Colors.red, width: 1.5) : null,
-        ),
-        child: Row(
-          children: [
-            if (expanded != null)
-              GestureDetector(
-                onTap: onToggle,
-                child: SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: Center(
-                    child: Text(
-                      expanded! ? '-' : '+',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey[700],
-                      ),
-                    ),
-                  ),
-                ),
-              )
-            else
-              const SizedBox(width: 16),
-            const SizedBox(width: 2),
-            Icon(icon, size: 16, color: selected ? Colors.deepPurple : Colors.grey[600]),
-            if (tagWidgets != null && tagWidgets!.isNotEmpty) ...[
-              const SizedBox(width: 2),
-              ...tagWidgets!,
-            ],
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
-                  color: selected ? Colors.deepPurple : null,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}

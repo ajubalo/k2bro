@@ -35,3 +35,7 @@ Resolves the download link (same as `link`), prints it, then opens it in VLC.
 Calls `/getFilesInfo` to retrieve file metadata without requiring authentication.
 
 Returns availability status, file size, video info (duration, resolution, streamability), and other metadata.
+
+### `scan <url>`
+
+Fetch the HTML of the page, find all links matching `https://k2s.cc/file/<id>` or `https://keep2share.cc/file/<id>`, extract the id, invoke the getFilesInfo and show metadata

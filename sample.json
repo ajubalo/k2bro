@@ -1,0 +1,297 @@
+{
+  "id": 104411,
+  "title": "Amazing Cos.169",
+  "projectID": 1,
+  "thumbnailUrl": "https://cdn-vr.deovr.com/images/104411/93914_amazing-cos-cover-app.jpg",
+  "skipIntro": 0,
+  "trailerReady": false,
+  "fullVideoReady": true,
+  "videoLength": 562,
+  "fullVideoLength": 562,
+  "fullAccess": true,
+  "is3d": true,
+  "videoThumbnail": "https://s3.deovr.com/preview/500f/104411_200p.mp4",
+  "videoPreview": "https://s3.deovr.com/preview/14x1/104411_200p.mp4",
+  "stereoMode": "sbs2l",
+  "description": " ",
+  "fps": 30,
+  "viewAngle": 120,
+  "projection": "unset",
+  "isFavorite": false,
+  "date": 1770034026,
+  "quantity": {
+    "views": 0,
+    "comments": 0,
+    "favorites": 0,
+    "likes": 0,
+    "dislikes": 0
+  },
+  "isPremium": true,
+  "timelinePreview": "https://cdn-vr.deovr.com/mosaic/104411/4096_timelinePreview341x195.jpg",
+  "viewsRaw": 0,
+  "encodings": [
+    {
+      "name": "h265",
+      "videoSources": [
+        {
+          "resolution": 1080,
+          "height": 1080,
+          "width": 3840,
+          "size": {
+            "w": 3840,
+            "h": 1080,
+            "size": 350919402,
+            "path": "h265/104411_1080p.mp4"
+          },
+          "url": ""
+        },
+        {
+          "resolution": 1440,
+          "height": 1440,
+          "width": 5120,
+          "size": {
+            "w": 5120,
+            "h": 1440,
+            "size": 567851212,
+            "path": "h265/104411_1440p.mp4"
+          },
+          "url": ""
+        },
+        {
+          "resolution": 1920,
+          "height": 1920,
+          "width": 6826,
+          "size": {
+            "w": 6826,
+            "h": 1920,
+            "size": 721318141,
+            "path": "h265/104411_1920p.mp4"
+          },
+          "url": ""
+        },
+        {
+          "resolution": 2160,
+          "height": 2160,
+          "width": 7680,
+          "size": {
+            "w": 7680,
+            "h": 2160,
+            "size": 874637586,
+            "path": "h265/104411_2160p.mp4"
+          },
+          "url": ""
+        }
+      ]
+    },
+    {
+      "name": "h264",
+      "videoSources": [
+        {
+          "resolution": 1080,
+          "height": 1080,
+          "width": 3840,
+          "size": {
+            "w": 3840,
+            "h": 1080,
+            "size": 356957029,
+            "path": "h264/104411_1080p.mp4"
+          },
+          "url": ""
+        },
+        {
+          "resolution": 1440,
+          "height": 1440,
+          "width": 5120,
+          "size": {
+            "w": 5120,
+            "h": 1440,
+            "size": 580756652,
+            "path": "h264/104411_1440p.mp4"
+          },
+          "url": ""
+        },
+        {
+          "resolution": 1920,
+          "height": 1920,
+          "width": 6826,
+          "size": {
+            "w": 6826,
+            "h": 1920,
+            "size": 727199003,
+            "path": "h264/104411_1920p.mp4"
+          },
+          "url": ""
+        },
+        {
+          "resolution": 2160,
+          "height": 2160,
+          "width": 7680,
+          "size": {
+            "w": 7680,
+            "h": 2160,
+            "size": 878229185,
+            "path": "h264/104411_2160p.mp4"
+          },
+          "url": ""
+        }
+      ]
+    },
+    {
+      "name": "h264_30",
+      "videoSources": [
+        {
+          "resolution": 1080,
+          "height": 1080,
+          "width": 3840,
+          "size": {
+            "w": 3840,
+            "h": 1080,
+            "size": 356952240,
+            "path": "h264_30/104411_1080p.mp4"
+          },
+          "url": ""
+        }
+      ]
+    },
+    {
+      "name": "mkv_h265_opus",
+      "videoSources": []
+    },
+    {
+      "name": "av1",
+      "videoSources": []
+    }
+  ],
+  "channel": {
+    "_id": "6807445656d2cc8d810041af",
+    "notes": "",
+    "state": {
+      "status": 2
+    },
+    "video_auto_activation": false,
+    "allowDownloadVideoFiles": true,
+    "allowDownloadFiles": {
+      "photos": true,
+      "videos": true
+    },
+    "url": {
+      "label": "3d-ultra-relaxing"
+    },
+    "name": "3D Ultra Relaxing",
+    "content": {
+      "description": ""
+    },
+    "images": {
+      "logo": {
+        "color": "#c2edff",
+        "original": "logo-original.jpg"
+      },
+      "cover": {
+        "desktop": "cover-desktop.jpg",
+        "mobile": "cover-mobile.jpg"
+      }
+    },
+    "transcoding": {
+      "deovr": {
+        "isPriority": false
+      }
+    },
+    "quantity": {
+      "scenes": 0,
+      "photos": 0,
+      "favorites": 434,
+      "deovr": {
+        "videos": {
+          "public": 309,
+          "total": 728
+        },
+        "photos": {
+          "public": 0,
+          "total": 0
+        }
+      },
+      "jillvr": {
+        "videos": {
+          "public": 186,
+          "total": 251
+        },
+        "photos": {
+          "public": 0,
+          "total": 0
+        }
+      }
+    },
+    "premium": {
+      "status": 2
+    },
+    "date": {
+      "created_at": "2025-04-23GMT+000008:33:38"
+    },
+    "isSuggestive": false,
+    "isNsfw": false,
+    "hasSuggestive": false,
+    "socialMediaLinks": null,
+    "disableMonetizationRequirements": false,
+    "niches": {
+      "58": {
+        "_id": 58,
+        "name": "AV1",
+        "micro": {
+          "113": {
+            "_id": 113,
+            "label": "av1-vr",
+            "name": "AV1"
+          }
+        }
+      },
+      "32": {
+        "_id": 32,
+        "name": "Resolution",
+        "micro": {
+          "49": {
+            "_id": 49,
+            "label": "4k-vr",
+            "name": "4K"
+          },
+          "50": {
+            "_id": 50,
+            "label": "5k-vr",
+            "name": "5K"
+          },
+          "51": {
+            "_id": 51,
+            "label": "6k-vr",
+            "name": "6K"
+          }
+        }
+      },
+      "34": {
+        "_id": 34,
+        "name": "Flat",
+        "micro": {
+          "56": {
+            "_id": 56,
+            "label": "flat-vr",
+            "name": "flat"
+          }
+        }
+      }
+    },
+    "premiumCompliance": {
+      "status": 2
+    },
+    "sandbox": {
+      "deovr": false
+    },
+    "owner": {
+      "_id": "6807445656d2cc8d810041af"
+    },
+    "suggestions_boost": {
+      "active": true,
+      "priority": "normal",
+      "date": "2026-02-05GMT+000012:25:24"
+    }
+  },
+  "channelSubscribersCount": 434,
+  "screenType": "flat"
+}
